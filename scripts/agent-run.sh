@@ -18,9 +18,9 @@ esac
 HEARTBEAT_PID=$!
 COMMAND_PID=
 LOGS_PID=
+"$ROOT_DIR/agent-commands.sh" &
+COMMAND_PID=$!
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  "$ROOT_DIR/agent-commands.sh" &
-  COMMAND_PID=$!
   (
     while :; do
       "$ROOT_DIR/agent-logs.sh" || echo "NodeDeck log collection failed; retrying on the next interval" >&2

@@ -105,7 +105,11 @@ async function snapshot(pool: Pool, organizationId: string) {
               CASE WHEN s.started_at IS NULL THEN NULL ELSE GREATEST(0, EXTRACT(EPOCH FROM (now() - s.started_at)))::bigint END AS "uptimeSec",
               s.compose_project AS "composeProject", s.compose_service AS "composeService", s.ports,
               s.is_protected AS "protected",
-              (s.kind = 'docker' AND s.compose_project IS NULL AND s.container_id IS NOT NULL) AS managed,
+              (s.container_id IS NOT NULL AND (
+                s.kind = 'docker'
+                OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
+                OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
+              )) AS managed,
               s.updated_at AS "updatedAt"
        FROM services s JOIN agents a ON a.id = s.agent_id
        WHERE s.organization_id = $1 AND a.revoked_at IS NULL AND s.runtime_state IS DISTINCT FROM 'missing'
@@ -530,8 +534,8 @@ export function createApp(config: Config, pool: Pool) {
         WHERE agent_id = $1 AND status = 'queued' AND expires_at <= now()`, [agent.rows[0].id, JSON.stringify({ message: 'Command expired before the agent claimed it.' })])
       await client.query(`UPDATE commands SET status = 'expired', completed_at = now(), result = $2::jsonb
         WHERE agent_id = $1 AND status = 'running' AND lease_expires_at <= now()`, [agent.rows[0].id, JSON.stringify({ message: 'Agent lease expired before the command completed.' })])
-      const next = await client.query<{ id: string; action: string; containerId: string }>(
-        `SELECT c.id, c.action, s.container_id AS "containerId" FROM commands c
+      const next = await client.query<{ id: string; action: string; resourceKey: string; containerId: string; kind: string }>(
+        `SELECT c.id, c.action, s.container_id AS "resourceKey", s.container_id AS "containerId", s.kind FROM commands c
          JOIN services s ON s.id = c.service_id
          WHERE c.agent_id = $1 AND c.status = 'queued' AND c.expires_at > now() AND s.container_id IS NOT NULL
          ORDER BY c.created_at FOR UPDATE SKIP LOCKED LIMIT 1`, [agent.rows[0].id])
@@ -680,7 +684,11 @@ export function createApp(config: Config, pool: Pool) {
       const command = await inTransaction(pool, async (client) => {
         const service = await client.query<{ id: string; agentId: string | null; agentOnline: boolean; protected: boolean; managed: boolean }>(
           `SELECT s.id, s.agent_id AS "agentId", s.is_protected AS protected,
-                  (s.kind = 'docker' AND s.compose_project IS NULL AND s.container_id IS NOT NULL) AS managed,
+                  (s.container_id IS NOT NULL AND (
+                    s.kind = 'docker'
+                    OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
+                    OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
+                  )) AS managed,
                   (a.revoked_at IS NULL AND a.last_seen_at >= now() - interval '60 seconds') AS "agentOnline"
            FROM services s LEFT JOIN agents a ON a.id = s.agent_id
            WHERE s.id = $1 AND s.organization_id = $2 FOR UPDATE OF s`,

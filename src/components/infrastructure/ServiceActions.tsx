@@ -19,16 +19,16 @@ export function ServiceActions({
   const busy = service.status === 'restarting'
   const down = service.status === 'offline'
 
+  if (service.protected) {
+    return <span className={cn('rounded-lg border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-[11px] text-warning', className)}>Protected</span>
+  }
+
   if (!service.managed) {
     return <span className={cn('rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-[11px] text-fg-faint', className)}>Monitor only</span>
   }
 
-  const run = (a: ServiceAction) => (e: React.MouseEvent) => {
+  const run = (a: ServiceAction) => (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation()
-    if (service.protected) {
-      pushToast({ title: `${service.name} is protected`, message: 'NodeDeck control-plane containers cannot be managed from their own dashboard.', tone: 'error' })
-      return
-    }
     if (a === 'stop' && !window.confirm(`Stop ${service.name}? The service will remain unavailable until it is started again.`)) return
     action.mutate(
       { id: service.id, action: a },
@@ -42,11 +42,11 @@ export function ServiceActions({
   return (
     <div className={cn('flex items-center gap-1.5', className)}>
       {down ? (
-        <Button size={size} variant="primary" onClick={run('start')} disabled={busy || service.protected} title={service.protected ? 'Protected control-plane service' : undefined}>
+        <Button size={size} variant="primary" onClick={run('start')} disabled={busy}>
           <Play className="h-4 w-4" /> Start
         </Button>
       ) : (
-        <Button size={size} variant="surface" onClick={run('restart')} disabled={busy || service.protected} title={service.protected ? 'Protected control-plane service' : undefined}>
+        <Button size={size} variant="surface" onClick={run('restart')} disabled={busy}>
           <RotateCw className={cn('h-4 w-4', busy && 'animate-spin')} />
           {busy ? 'Restarting' : 'Restart'}
         </Button>
@@ -55,7 +55,7 @@ export function ServiceActions({
         size={size === 'md' ? 'md' : 'icon'}
         variant="ghost"
         onClick={run('stop')}
-        disabled={down || busy || service.protected}
+        disabled={down || busy}
         aria-label="Stop"
         title="Stop"
       >

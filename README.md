@@ -27,7 +27,7 @@ Set `HOST_ALERT_THRESHOLD` (50–100, default `90`) to control when CPU, RAM, or
 ## Connect a server
 
 1. Sign in, open **Agents**, and click **Enroll agent**.
-2. Copy the generated one-time enrollment command; it exchanges the token with `POST /agent/v1/enroll`.
+2. Copy the generated one-line enrollment command; it installs the background agent and exchanges the token with `POST /agent/v1/enroll`.
 3. Paste the generated command into any terminal. For local development from a checkout, use:
 
 ```sh
@@ -46,6 +46,10 @@ optional. When Docker is available, the agent also sends a bounded, redacted log
 
 Owners and admins can revoke an agent from **Agents**. Revocation immediately invalidates its
 credential and marks its managed services offline; it never stops or deletes containers on the host.
+
+NodeDeck can start, stop, and restart standalone Docker containers, whole Docker Compose projects,
+user-level systemd services, and PM2 processes. System-level systemd units stay monitoring-only,
+and the NodeDeck control plane is protected from managing itself.
 
 ### Start on macOS automatically
 
@@ -68,10 +72,10 @@ launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.server-os.agent
 
 ## Command safety
 
-Commands are organization-scoped and tied to the agent that owns the discovered container. They
+Commands are organization-scoped and tied to the agent that owns the discovered resource. They
 expire after ten minutes, are leased for two minutes once claimed, and are reported as queued,
 running, succeeded, failed, or expired. The agent validates the same allowlist before invoking
-Docker and sends no arbitrary shell command from the API. Browser-issued commands carry an
+Docker, systemd, or PM2 and accepts no arbitrary shell command from the API. Browser-issued commands carry an
 idempotency key, so a repeated click or network retry does not queue a duplicate action.
 
 The dashboard receives snapshots through same-origin Server-Sent Events authenticated by the

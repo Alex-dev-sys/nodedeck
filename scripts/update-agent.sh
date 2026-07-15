@@ -11,7 +11,7 @@ PLIST="$HOME/Library/LaunchAgents/com.server-os.agent.plist"
 
 umask 077
 mkdir -p "$BIN_DIR"
-for script in agent-daemon.sh agent-run.sh agent-heartbeat.sh agent-inventory.sh agent-logs.sh agent-commands.sh; do
+for script in agent-daemon.sh agent-run.sh agent-heartbeat.sh agent-inventory.sh agent-logs.sh agent-commands.sh agent-command-exec.sh; do
   cp "$ROOT_DIR/$script" "$BIN_DIR/$script"
   chmod 700 "$BIN_DIR/$script"
 done
