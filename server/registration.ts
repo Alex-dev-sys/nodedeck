@@ -63,8 +63,8 @@ export async function registerOwner(pool: Pool, input: z.infer<typeof registrati
       )
       await client.query(
         `INSERT INTO audit_logs (organization_id, actor_id, action, target, result)
-         VALUES ($1, $2, 'organization.register', $1::text, 'ok')`,
-        [current.organizationId, current.id],
+         VALUES ($1, $2, 'organization.register', $3, 'ok')`,
+        [current.organizationId, current.id, current.organizationId],
       )
       return current
     })
