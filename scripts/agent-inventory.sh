@@ -3,7 +3,7 @@ set -eu
 
 : "${SERVER_OS_AGENT_TOKEN:?Set SERVER_OS_AGENT_TOKEN before starting the agent}"
 CONTROL_URL=${SERVER_OS_CONTROL_URL:-http://127.0.0.1:8081}
-PROTECTED_PROJECTS=${SERVER_OS_PROTECTED_PROJECTS:-server-os,server-os-stage2,infra-dashboard,nodedeck}
+PROTECTED_PROJECTS=${SERVER_OS_PROTECTED_PROJECTS:-server-os,server-os-stage2,infra-dashboard-release-smoke,infra-dashboard,nodedeck}
 
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
@@ -12,10 +12,14 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   stats=$(docker stats --no-stream --no-trunc --format '{{json .}}' | jq -s 'map({key: .ID, cpu: ((.CPUPerc // "0%" | rtrimstr("%") | tonumber) // 0), ram: ((.MemPerc // "0%" | rtrimstr("%") | tonumber) // 0)})')
   container_ids=$(docker ps -aq --no-trunc)
   if [ -n "$container_ids" ]; then
-    inspection=$(docker inspect $container_ids | jq '[.[] |
+    inspection=$(docker inspect $container_ids | jq --arg protected "$PROTECTED_PROJECTS" '
+      ($protected | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $protectedProjects |
+      [.[] |
       (.Config.Labels // {}) as $labels |
-      ($labels["io.nodedeck.project.key"] // $labels["com.docker.compose.project"] // null) as $projectKey |
-      ($labels["io.nodedeck.project.name"] // $projectKey // (.Name | ltrimstr("/"))) as $projectName |
+      ($labels["io.nodedeck.project.key"] // null) as $explicitProjectKey |
+      ($labels["com.docker.compose.project"] // null) as $composeProject |
+      (if $explicitProjectKey != null then $explicitProjectKey elif ($protectedProjects | index($composeProject)) != null then "infra-dashboard" else $composeProject end) as $projectKey |
+      ($labels["io.nodedeck.project.name"] // (if $projectKey == "infra-dashboard" then "Infra Dashboard" else $projectKey end) // (.Name | ltrimstr("/"))) as $projectName |
       {
         containerId: .Id,
         containerName: (.Name | ltrimstr("/")),
@@ -24,7 +28,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         healthStatus: (.State.Health.Status // "none"),
         restartCount: (.RestartCount // 0),
         startedAt: (if .State.Running and (.State.StartedAt // "") != "0001-01-01T00:00:00Z" then .State.StartedAt else null end),
-        composeProject: ($labels["com.docker.compose.project"] // null),
+        composeProject: $composeProject,
         composeService: ($labels["com.docker.compose.service"] // null),
         projectKey: $projectKey,
         projectName: $projectName,

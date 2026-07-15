@@ -26,8 +26,8 @@ case "$1" in
   ps) printf '%s\\n' c1 c2 ;;
   inspect)
     printf '%s\\n' '[
-      {"Id":"c1","Name":"/infra-api","Config":{"Image":"infra-api:latest","Labels":{"io.nodedeck.project.key":"infra-dashboard","io.nodedeck.project.name":"Infra Dashboard","io.nodedeck.protected":"true","com.docker.compose.project":"server-os","com.docker.compose.service":"api"}},"State":{"Status":"running","Running":true,"StartedAt":"2026-07-15T20:00:00Z","Health":{"Status":"healthy"}},"RestartCount":1,"NetworkSettings":{"Ports":{}}},
-      {"Id":"c2","Name":"/infra-web","Config":{"Image":"infra-web:latest","Labels":{"io.nodedeck.project.key":"infra-dashboard","io.nodedeck.project.name":"Infra Dashboard","io.nodedeck.protected":"true","com.docker.compose.project":"server-os","com.docker.compose.service":"web"}},"State":{"Status":"running","Running":true,"StartedAt":"2026-07-15T20:00:00Z","Health":{"Status":"healthy"}},"RestartCount":2,"NetworkSettings":{"Ports":{}}}
+      {"Id":"c1","Name":"/infra-api","Config":{"Image":"infra-api:latest","Labels":{"com.docker.compose.project":"server-os-stage2","com.docker.compose.service":"api"}},"State":{"Status":"running","Running":true,"StartedAt":"2026-07-15T20:00:00Z","Health":{"Status":"healthy"}},"RestartCount":1,"NetworkSettings":{"Ports":{}}},
+      {"Id":"c2","Name":"/infra-web","Config":{"Image":"infra-web:latest","Labels":{"com.docker.compose.project":"infra-dashboard-release-smoke","com.docker.compose.service":"web"}},"State":{"Status":"running","Running":true,"StartedAt":"2026-07-15T20:00:00Z","Health":{"Status":"healthy"}},"RestartCount":2,"NetworkSettings":{"Ports":{}}}
     ]'
     ;;
   *) exit 1 ;;
