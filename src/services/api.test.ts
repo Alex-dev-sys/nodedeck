@@ -15,6 +15,9 @@ describe('toInfraSnapshot', () => {
           version: '2.8.0',
           cpu: 23.5,
           ram: 41.2,
+          controlEnabled: false,
+          autoRecovery: true,
+          desiredState: 'stopped',
           updatedAt: '2026-07-10T11:00:00.000Z',
         },
         {
@@ -32,7 +35,7 @@ describe('toInfraSnapshot', () => {
     })
 
     expect(snapshot.services).toMatchObject([
-      { id: 'api', kind: 'api', status: 'healthy', metrics: { cpu: 23.5, ram: 41.2 } },
+      { id: 'api', kind: 'api', status: 'healthy', metrics: { cpu: 23.5, ram: 41.2 }, controlEnabled: false, autoRecovery: true, desiredState: 'stopped' },
       { id: 'bot', kind: 'systemd', status: 'healthy', managed: false },
     ])
     expect(snapshot.summary).toMatchObject({ total: 2, online: 2, offline: 0, healthScore: 100 })

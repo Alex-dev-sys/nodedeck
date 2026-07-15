@@ -16,6 +16,7 @@ import { ServiceActions } from './ServiceActions'
 import { LogStream } from '@/components/logs/LogStream'
 import { fetchLogs } from '@/services/operations'
 import { useAuth } from '@/stores/auth'
+import { ServiceSettings } from '@/components/service/ServiceSettings'
 
 export function ServiceDrawer() {
   const id = useUI((state) => state.drawerServiceId)
@@ -73,7 +74,10 @@ function DrawerBody({ service, onClose }: { service: Service; onClose: () => voi
       <div className="flex-1 space-y-5 overflow-y-auto p-5">
         <div className="flex items-center justify-between gap-2">
           <Badge color={meta.hex}><StatusDot status={service.status} size={6} pulse={false} /> {meta.label}</Badge>
-          <ServiceActions service={service} size="sm" />
+          <div className="flex items-center gap-2">
+            <ServiceSettings service={service} />
+            <ServiceActions service={service} size="sm" />
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-2.5">
@@ -97,6 +101,8 @@ function DrawerBody({ service, onClose }: { service: Service; onClose: () => voi
           {(service.ports?.length ?? 0) > 0 && <Row label="Ports" value={service.ports!.join(', ')} mono />}
           {service.protected && <Row label="Control" value="Protected" />}
           {!service.managed && !service.protected && <Row label="Control" value="Monitoring only" />}
+          {service.managed && !service.protected && service.controlEnabled === false && <Row label="Control" value="Locked in settings" />}
+          {service.managed && !service.protected && <Row label="Auto recovery" value={service.autoRecovery ? 'On' : 'Off'} />}
         </div>
 
         <div>

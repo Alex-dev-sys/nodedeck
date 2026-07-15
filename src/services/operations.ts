@@ -11,7 +11,7 @@ export interface RemoteLogLine {
 export interface RemoteAlert {
   id: string
   serviceId: string | null
-  kind: 'agent_offline' | 'command_failed' | 'service_offline' | 'service_unhealthy' | 'host_resource_high'
+  kind: 'agent_offline' | 'command_failed' | 'service_offline' | 'service_unhealthy' | 'host_resource_high' | 'service_resource_high'
   status: 'open' | 'resolved'
   title: string
   details: { message?: string; lastSeenAt?: string; name?: string; cpu?: number; ram?: number; disk?: number; threshold?: number }
@@ -48,6 +48,19 @@ export interface NotificationChannel {
   enabled: boolean
   createdAt: string
 }
+
+export interface RemoteServiceSettings {
+  displayName: string | null
+  controlEnabled: boolean
+  autoRecovery: boolean
+  recoveryDelaySec: number
+  cpuAlertThreshold: number
+  ramAlertThreshold: number
+  protected: boolean
+  updatedAt: string | null
+}
+
+export type ServiceSettingsInput = Pick<RemoteServiceSettings, 'displayName' | 'controlEnabled' | 'autoRecovery' | 'recoveryDelaySec' | 'cpuAlertThreshold' | 'ramAlertThreshold'>
 
 export type NotificationChannelInput =
   | { kind: 'telegram'; name: string; botToken: string; chatId: string }
@@ -87,6 +100,14 @@ export async function fetchAlerts(accessToken: string) {
 
 export async function fetchCommands(accessToken: string) {
   return request<{ commands: RemoteCommand[] }>('/api/v1/commands', accessToken)
+}
+
+export async function fetchServiceSettings(accessToken: string, serviceId: string) {
+  return request<{ settings: RemoteServiceSettings }>(`/api/v1/services/${encodeURIComponent(serviceId)}/settings`, accessToken)
+}
+
+export async function updateServiceSettings(accessToken: string, serviceId: string, input: ServiceSettingsInput) {
+  return mutate<{ settings: RemoteServiceSettings }>(`/api/v1/services/${encodeURIComponent(serviceId)}/settings`, accessToken, { method: 'PUT', body: JSON.stringify(input) })
 }
 
 export async function fetchHostMetrics(accessToken: string, range: string) {

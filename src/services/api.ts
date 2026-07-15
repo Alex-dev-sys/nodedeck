@@ -42,6 +42,9 @@ interface BackendService {
   ports?: string[] | null
   protected?: boolean | null
   managed?: boolean | null
+  controlEnabled?: boolean | null
+  autoRecovery?: boolean | null
+  desiredState?: 'running' | 'stopped' | null
   updatedAt: string
 }
 
@@ -156,6 +159,9 @@ function toService(row: BackendService): Service {
     ports: row.ports ?? [],
     protected: row.protected ?? false,
     managed: row.managed ?? false,
+    controlEnabled: row.controlEnabled ?? true,
+    autoRecovery: row.autoRecovery ?? false,
+    desiredState: row.desiredState ?? 'running',
   }
 }
 

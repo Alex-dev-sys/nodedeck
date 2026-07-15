@@ -67,6 +67,9 @@ export interface Service {
   ports?: string[]
   protected?: boolean
   managed?: boolean
+  controlEnabled?: boolean
+  autoRecovery?: boolean
+  desiredState?: 'running' | 'stopped'
 }
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low'

@@ -27,6 +27,10 @@ export function ServiceActions({
     return <span className={cn('rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-[11px] text-fg-faint', className)}>Monitor only</span>
   }
 
+  if (service.controlEnabled === false) {
+    return <span className={cn('rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-[11px] text-fg-faint', className)}>Control locked</span>
+  }
+
   const run = (a: ServiceAction) => (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation()
     if (a === 'stop' && !window.confirm(`Stop ${service.name}? The service will remain unavailable until it is started again.`)) return

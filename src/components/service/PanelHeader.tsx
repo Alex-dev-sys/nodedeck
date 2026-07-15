@@ -5,6 +5,7 @@ import { kindIcon, statusMeta } from '@/lib/serviceMeta'
 import { StatusDot } from '@/components/ui/StatusDot'
 import { Badge } from '@/components/ui/Badge'
 import { ServiceActions } from '@/components/infrastructure/ServiceActions'
+import { ServiceSettings } from './ServiceSettings'
 
 /** Shared header for the per-service deep panels. */
 export function PanelHeader({ service, tagline }: { service: Service; tagline: string }) {
@@ -40,7 +41,10 @@ export function PanelHeader({ service, tagline }: { service: Service; tagline: s
             <span className="font-mono">{service.hostname}</span>
           </div>
         </div>
-        <ServiceActions service={service} size="md" />
+        <div className="flex items-center gap-2">
+          <ServiceSettings service={service} />
+          <ServiceActions service={service} size="md" />
+        </div>
       </div>
     </div>
   )

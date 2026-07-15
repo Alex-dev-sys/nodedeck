@@ -14,6 +14,14 @@ import { openSecret, sealSecret } from './secrets.js'
 
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) })
 const commandSchema = z.object({ action: z.enum(['start', 'restart', 'stop']) })
+const servicePolicySchema = z.object({
+  displayName: z.string().trim().min(1).max(80).nullable(),
+  controlEnabled: z.boolean(),
+  autoRecovery: z.boolean(),
+  recoveryDelaySec: z.coerce.number().int().min(60).max(900),
+  cpuAlertThreshold: z.coerce.number().int().min(50).max(100),
+  ramAlertThreshold: z.coerce.number().int().min(50).max(100),
+}).refine((value) => !value.autoRecovery || value.controlEnabled, { message: 'Auto recovery requires remote control to be enabled.', path: ['autoRecovery'] })
 const enrollmentSchema = z.object({ name: z.string().trim().min(1).max(80) })
 const agentEnrollmentSchema = z.object({ token: z.string().min(32), hostname: z.string().trim().min(1).max(255) })
 const heartbeatSchema = z.object({
@@ -93,18 +101,24 @@ interface ServiceRow {
   composeService: string | null
   ports: string[]
   protected: boolean
+  controlEnabled: boolean
+  autoRecovery: boolean
+  desiredState: string
   updatedAt: string
 }
 
 async function snapshot(pool: Pool, organizationId: string) {
   const [services, incidents, agent] = await Promise.all([
     pool.query<ServiceRow>(
-      `SELECT s.id, s.name, s.kind, s.status, s.hostname, s.version, s.cpu, s.ram,
+      `SELECT s.id, COALESCE(p.display_name, s.name) AS name, s.kind, s.status, s.hostname, s.version, s.cpu, s.ram,
               s.container_id AS "containerId", s.runtime_state AS "runtimeState", s.health_status AS "healthStatus",
               s.restart_count AS "restartCount",
               CASE WHEN s.started_at IS NULL THEN NULL ELSE GREATEST(0, EXTRACT(EPOCH FROM (now() - s.started_at)))::bigint END AS "uptimeSec",
               s.compose_project AS "composeProject", s.compose_service AS "composeService", s.ports,
               s.is_protected AS "protected",
+              COALESCE(p.control_enabled, true) AS "controlEnabled",
+              COALESCE(p.auto_recovery, false) AS "autoRecovery",
+              s.desired_state AS "desiredState",
               (s.container_id IS NOT NULL AND (
                 s.kind = 'docker'
                 OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
@@ -112,6 +126,7 @@ async function snapshot(pool: Pool, organizationId: string) {
               )) AS managed,
               s.updated_at AS "updatedAt"
        FROM services s JOIN agents a ON a.id = s.agent_id
+       LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
        WHERE s.organization_id = $1 AND a.revoked_at IS NULL AND s.runtime_state IS DISTINCT FROM 'missing'
        ORDER BY s.name`,
       [organizationId],
@@ -150,7 +165,7 @@ function writeEvent(res: Response, event: string, body: unknown) {
 export function createApp(config: Config, pool: Pool) {
   const app = express()
   app.disable('x-powered-by')
-  app.use(cors({ origin: config.CORS_ORIGIN, credentials: true, methods: ['GET', 'POST', 'DELETE'], allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'] }))
+  app.use(cors({ origin: config.CORS_ORIGIN, credentials: true, methods: ['GET', 'POST', 'PUT', 'DELETE'], allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'] }))
   app.use((req: AuthenticatedRequest, res: Response, next: (error?: unknown) => void) => {
     const supplied = req.header('x-request-id')
     req.requestId = supplied && /^[A-Za-z0-9_-]{8,128}$/.test(supplied) ? supplied : randomBytes(12).toString('hex')
@@ -506,6 +521,54 @@ export function createApp(config: Config, pool: Pool) {
       }
       const resourceKeys = services.map((service) => service.id)
       await client.query(
+        `INSERT INTO alert_events (organization_id, agent_id, service_id, kind, title, details)
+         SELECT s.organization_id, s.agent_id, s.id, 'service_resource_high', 'Service resource usage is high',
+                jsonb_build_object('name', COALESCE(p.display_name, s.name), 'cpu', s.cpu, 'ram', s.ram,
+                  'cpuThreshold', p.cpu_alert_threshold, 'ramThreshold', p.ram_alert_threshold)
+         FROM services s JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
+         WHERE s.agent_id = $1 AND s.container_id = ANY($2::text[])
+           AND (s.cpu >= p.cpu_alert_threshold OR s.ram >= p.ram_alert_threshold)
+         ON CONFLICT (service_id, kind) WHERE status = 'open' AND service_id IS NOT NULL DO NOTHING`,
+        [current.id, resourceKeys],
+      )
+      await client.query(
+        `UPDATE alert_events a SET status = 'resolved', resolved_at = now()
+         FROM services s JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
+         WHERE a.service_id = s.id AND a.kind = 'service_resource_high' AND a.status = 'open'
+           AND s.agent_id = $1 AND s.container_id = ANY($2::text[])
+           AND s.cpu < p.cpu_alert_threshold AND s.ram < p.ram_alert_threshold`,
+        [current.id, resourceKeys],
+      )
+      await client.query(
+        `WITH eligible AS (
+           SELECT s.id AS service_id, s.organization_id, s.agent_id, p.updated_by,
+                  'auto_' || md5(s.id || ':' || floor(extract(epoch FROM now()) / p.recovery_delay_sec)::text) AS idempotency_key
+           FROM services s
+           JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
+           JOIN agents a ON a.id = s.agent_id AND a.revoked_at IS NULL AND a.last_seen_at >= now() - interval '60 seconds'
+           WHERE s.agent_id = $1 AND s.container_id = ANY($2::text[])
+             AND s.status = 'offline' AND s.runtime_state IS DISTINCT FROM 'missing'
+             AND s.desired_state = 'running' AND p.auto_recovery = true AND p.control_enabled = true
+             AND s.is_protected = false
+             AND (s.kind = 'docker' OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%') OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%'))
+             AND NOT EXISTS (
+               SELECT 1 FROM commands c WHERE c.service_id = s.id AND c.action = 'restart'
+                 AND (c.status IN ('queued', 'running') OR c.created_at > now() - make_interval(secs => p.recovery_delay_sec))
+             )
+         ), created AS (
+           INSERT INTO commands (organization_id, agent_id, service_id, action, requested_by, expires_at, idempotency_key)
+           SELECT organization_id, agent_id, service_id, 'restart', updated_by, now() + interval '10 minutes', idempotency_key
+           FROM eligible
+           ON CONFLICT (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+           RETURNING id, organization_id, requested_by, service_id
+         ), audited AS (
+           INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
+           SELECT organization_id, requested_by, 'service.restart.auto', service_id, 'ok', jsonb_build_object('commandId', id)
+           FROM created RETURNING id
+         ) SELECT count(*) FROM audited`,
+        [current.id, resourceKeys],
+      )
+      await client.query(
         `UPDATE services SET status = 'offline', runtime_state = 'missing', cpu = 0, ram = 0, updated_at = now()
          WHERE agent_id = $1 AND container_id IS NOT NULL AND NOT (container_id = ANY($2::text[]))`,
         [current.id, resourceKeys],
@@ -594,6 +657,72 @@ export function createApp(config: Config, pool: Pool) {
     res.json(data)
   })
 
+  app.get('/api/v1/services/:serviceId/settings', requireAuth(config), async (req: AuthenticatedRequest, res) => {
+    const settings = await pool.query(
+      `SELECT p.display_name AS "displayName", COALESCE(p.control_enabled, true) AS "controlEnabled",
+              COALESCE(p.auto_recovery, false) AS "autoRecovery", COALESCE(p.recovery_delay_sec, 120) AS "recoveryDelaySec",
+              COALESCE(p.cpu_alert_threshold, 90) AS "cpuAlertThreshold", COALESCE(p.ram_alert_threshold, 90) AS "ramAlertThreshold",
+              p.updated_at AS "updatedAt", s.is_protected AS protected
+       FROM services s LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
+       WHERE s.id = $1 AND s.organization_id = $2`,
+      [req.params.serviceId, req.user!.organizationId],
+    )
+    if (!settings.rowCount) return res.status(404).json({ error: 'service_not_found' })
+    res.json({ settings: settings.rows[0] })
+  })
+
+  app.put(
+    '/api/v1/services/:serviceId/settings',
+    requireAuth(config),
+    requireRole('owner', 'admin'),
+    async (req: AuthenticatedRequest, res) => {
+      const input = servicePolicySchema.parse(req.body)
+      const user = req.user!
+      const outcome = await inTransaction(pool, async (client) => {
+        const service = await client.query<{ id: string; protected: boolean; managed: boolean }>(
+          `SELECT s.id, s.is_protected AS protected,
+                  (s.container_id IS NOT NULL AND (
+                    s.kind = 'docker'
+                    OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
+                    OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
+                  )) AS managed
+           FROM services s WHERE s.id = $1 AND s.organization_id = $2 FOR UPDATE`,
+          [req.params.serviceId, user.organizationId],
+        )
+        const current = service.rows[0]
+        if (!current) return 'missing' as const
+        if (input.autoRecovery && (current.protected || !current.managed)) return 'auto_recovery_unavailable' as const
+
+        const saved = await client.query(
+          `INSERT INTO service_policies (
+             service_id, organization_id, display_name, control_enabled, auto_recovery, recovery_delay_sec,
+             cpu_alert_threshold, ram_alert_threshold, created_by, updated_by
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+           ON CONFLICT (service_id) DO UPDATE SET
+             display_name = EXCLUDED.display_name, control_enabled = EXCLUDED.control_enabled,
+             auto_recovery = EXCLUDED.auto_recovery, recovery_delay_sec = EXCLUDED.recovery_delay_sec,
+             cpu_alert_threshold = EXCLUDED.cpu_alert_threshold, ram_alert_threshold = EXCLUDED.ram_alert_threshold,
+             updated_by = EXCLUDED.updated_by, updated_at = now()
+           RETURNING display_name AS "displayName", control_enabled AS "controlEnabled", auto_recovery AS "autoRecovery",
+             recovery_delay_sec AS "recoveryDelaySec", cpu_alert_threshold AS "cpuAlertThreshold",
+             ram_alert_threshold AS "ramAlertThreshold", updated_at AS "updatedAt"`,
+          [current.id, user.organizationId, input.displayName, input.controlEnabled, input.autoRecovery, input.recoveryDelaySec, input.cpuAlertThreshold, input.ramAlertThreshold, user.id],
+        )
+        await client.query(
+          `INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
+           VALUES ($1, $2, 'service.settings.update', $3, 'ok', $4::jsonb)`,
+          [user.organizationId, user.id, current.id, JSON.stringify({ controlEnabled: input.controlEnabled, autoRecovery: input.autoRecovery, recoveryDelaySec: input.recoveryDelaySec, cpuAlertThreshold: input.cpuAlertThreshold, ramAlertThreshold: input.ramAlertThreshold })],
+        )
+        return { ...saved.rows[0], protected: current.protected }
+      })
+
+      if (outcome === 'missing') return res.status(404).json({ error: 'service_not_found' })
+      if (outcome === 'auto_recovery_unavailable') return res.status(409).json({ error: 'auto_recovery_unavailable', message: 'Auto recovery is unavailable for protected or monitoring-only services.' })
+      publishSnapshotChanged(user.organizationId)
+      res.json({ settings: outcome })
+    },
+  )
+
   app.get('/api/v1/metrics/host', requireAuth(config), async (req: AuthenticatedRequest, res) => {
     const { range } = metricRangeSchema.parse(req.query)
     const rangeInterval = { '15m': '15 minutes', '1h': '1 hour', '6h': '6 hours', '24h': '24 hours', '7d': '7 days', '30d': '30 days' }[range]
@@ -639,10 +768,11 @@ export function createApp(config: Config, pool: Pool) {
   app.get('/api/v1/commands', requireAuth(config), async (req: AuthenticatedRequest, res) => {
     const { limit } = commandListQuerySchema.parse(req.query)
     const commands = await pool.query(
-      `SELECT c.id, c.service_id AS "serviceId", s.name AS "serviceName", c.action, c.status,
+      `SELECT c.id, c.service_id AS "serviceId", COALESCE(p.display_name, s.name) AS "serviceName", c.action, c.status,
               c.created_at AS "createdAt", c.claimed_at AS "claimedAt", c.started_at AS "startedAt",
               c.completed_at AS "completedAt", c.expires_at AS "expiresAt", c.result
        FROM commands c JOIN services s ON s.id = c.service_id AND s.organization_id = c.organization_id
+       LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
        WHERE c.organization_id = $1 ORDER BY c.created_at DESC LIMIT $2`,
       [req.user!.organizationId, limit],
     )
@@ -682,21 +812,24 @@ export function createApp(config: Config, pool: Pool) {
       const idempotencyKey = req.header('idempotency-key')
       if (idempotencyKey && !/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) return res.status(400).json({ error: 'invalid_idempotency_key' })
       const command = await inTransaction(pool, async (client) => {
-        const service = await client.query<{ id: string; agentId: string | null; agentOnline: boolean; protected: boolean; managed: boolean }>(
+        const service = await client.query<{ id: string; agentId: string | null; agentOnline: boolean; protected: boolean; managed: boolean; controlEnabled: boolean }>(
           `SELECT s.id, s.agent_id AS "agentId", s.is_protected AS protected,
                   (s.container_id IS NOT NULL AND (
                     s.kind = 'docker'
                     OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
                     OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
                   )) AS managed,
+                  COALESCE(p.control_enabled, true) AS "controlEnabled",
                   (a.revoked_at IS NULL AND a.last_seen_at >= now() - interval '60 seconds') AS "agentOnline"
            FROM services s LEFT JOIN agents a ON a.id = s.agent_id
+           LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
            WHERE s.id = $1 AND s.organization_id = $2 FOR UPDATE OF s`,
           [req.params.serviceId, user.organizationId],
         )
         if (!service.rowCount) return null
         if (!service.rows[0].agentId) return 'unmanaged' as const
         if (!service.rows[0].managed) return 'unmanaged' as const
+        if (!service.rows[0].controlEnabled) return 'control_disabled' as const
         if (!service.rows[0].agentOnline) return 'agent_offline' as const
         if (service.rows[0].protected) return 'protected' as const
 
@@ -713,8 +846,10 @@ export function createApp(config: Config, pool: Pool) {
              FROM commands WHERE organization_id = $1 AND idempotency_key = $2`,
             [user.organizationId, idempotencyKey],
           )
+          await client.query(`UPDATE services SET desired_state = $2 WHERE id = $1 AND organization_id = $3`, [req.params.serviceId, action === 'stop' ? 'stopped' : 'running', user.organizationId])
           return existing.rows[0]
         }
+        await client.query(`UPDATE services SET desired_state = $2 WHERE id = $1 AND organization_id = $3`, [req.params.serviceId, action === 'stop' ? 'stopped' : 'running', user.organizationId])
         await client.query(
           `INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
            VALUES ($1, $2, $3, $4, 'ok', $5::jsonb)`,
@@ -728,6 +863,7 @@ export function createApp(config: Config, pool: Pool) {
         return
       }
       if (command === 'unmanaged') return res.status(409).json({ error: 'service_not_managed' })
+      if (command === 'control_disabled') return res.status(409).json({ error: 'service_control_disabled', message: 'Remote control is disabled in this service settings.' })
       if (command === 'agent_offline') return res.status(409).json({ error: 'agent_offline', message: 'This service agent is offline. Reconnect it from the Agents page, then try again.' })
       if (command === 'protected') return res.status(409).json({ error: 'service_protected', message: 'NodeDeck control-plane containers are protected from self-management.' })
       publishSnapshotChanged(user.organizationId)
