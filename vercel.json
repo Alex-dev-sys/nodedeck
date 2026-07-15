@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "VITE_APP_MODE=production VITE_REALTIME_MODE=polling npm run build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/server.ts": { "maxDuration": 60 },
+    "api/cron.ts": { "maxDuration": 60 }
+  },
+  "rewrites": [
+    { "source": "/api/v1/:path*", "destination": "/api/server" },
+    { "source": "/agent/v1/:path*", "destination": "/api/server" },
+    { "source": "/healthz", "destination": "/api/server" },
+    { "source": "/((?!api/|agent/|healthz).*)", "destination": "/index.html" }
+  ],
+  "crons": [
+    { "path": "/api/cron", "schedule": "0 3 * * *" }
+  ]
+}

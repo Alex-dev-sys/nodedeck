@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: infra_dashboard
+      POSTGRES_USER: infra
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - infra-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infra -d infra_dashboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: api.Dockerfile
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8787
+      CORS_ORIGIN: ${CORS_ORIGIN:?set CORS_ORIGIN in .env}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-10}
+      DATABASE_SSL: ${DATABASE_SSL:-false}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      LOCAL_AUTH_BYPASS: ${LOCAL_AUTH_BYPASS:-false}
+      HOST_ALERT_THRESHOLD: ${HOST_ALERT_THRESHOLD:-90}
+      CRON_SECRET: ${CRON_SECRET:-}
+      BOOTSTRAP_EMAIL: ${BOOTSTRAP_EMAIL:?set BOOTSTRAP_EMAIL in .env}
+      BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:?set BOOTSTRAP_PASSWORD in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: web.Dockerfile
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  infra-postgres:

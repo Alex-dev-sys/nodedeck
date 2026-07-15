@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+      - run: sh -n scripts/agent-heartbeat.sh scripts/agent-inventory.sh scripts/agent-logs.sh scripts/agent-commands.sh scripts/agent-run.sh scripts/agent-daemon.sh scripts/install-agent.sh scripts/smoke-test.sh scripts/agent-e2e-test.sh scripts/release-verify.sh
+
+  integration:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      POSTGRES_PASSWORD: ci-postgres-password
+      CORS_ORIGIN: http://127.0.0.1:8081
+      DATABASE_URL: postgresql://infra:ci-postgres-password@postgres:5432/infra_dashboard
+      JWT_SECRET: ci-jwt-secret-that-is-longer-than-thirty-two-characters
+      BOOTSTRAP_EMAIL: owner@example.com
+      BOOTSTRAP_PASSWORD: ci-bootstrap-password
+      WEB_PORT: 8081
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up --build -d
+      - run: SERVER_OS_RELEASE_PASSWORD="$BOOTSTRAP_PASSWORD" ./scripts/release-verify.sh
+      - if: always()
+        run: docker compose down --volumes --remove-orphans
