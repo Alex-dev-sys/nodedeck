@@ -46,3 +46,30 @@ export async function login(email: string, password: string): Promise<LoginRespo
   }
   return response.json() as Promise<LoginResponse>
 }
+
+export async function register(organizationName: string, email: string, password: string): Promise<LoginResponse> {
+  let response: Response
+  try {
+    response = await fetch(`${import.meta.env.VITE_API_BASE_URL ?? ''}/api/v1/auth/register`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ organizationName, email, password }),
+      credentials: 'include',
+    })
+  } catch {
+    throw new ApiError('Unable to reach the NodeDeck API.')
+  }
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null) as { error?: string } | null
+    const message = error?.error === 'email_exists'
+      ? 'An account with this email already exists.'
+      : error?.error === 'organization_exists'
+        ? 'This workspace name is already taken.'
+        : error?.error === 'invalid_request'
+          ? 'Check the workspace name, email, and password.'
+          : 'Unable to create your account.'
+    throw new ApiError(message, response.status, error?.error)
+  }
+  return response.json() as Promise<LoginResponse>
+}

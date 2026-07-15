@@ -9,6 +9,7 @@ import { inTransaction } from './db/pool.js'
 import { publishSnapshotChanged, subscribeSnapshotChanged } from './events.js'
 import { errorHandler, requireAuth, requireRole, type AuthenticatedRequest } from './http.js'
 import { sendNotification, validateWebhookUrl, type NotificationChannelConfig } from './notifications.js'
+import { registerOwner, RegistrationConflictError, registrationSchema } from './registration.js'
 import { openSecret, sealSecret } from './secrets.js'
 
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) })
@@ -213,6 +214,21 @@ export function createApp(config: Config, pool: Pool) {
       accessToken: signAccessToken(user, config),
       user: { id: user.id, email: user.email, role: user.role, organizationId: user.organizationId },
     })
+  })
+
+  app.post('/api/v1/auth/register', async (req, res) => {
+    const input = registrationSchema.parse(req.body)
+    try {
+      const { user, refreshToken } = await registerOwner(pool, input)
+      res.cookie('server_os_refresh', refreshToken, { httpOnly: true, sameSite: 'lax', secure: config.COOKIE_SECURE, maxAge: 30 * 24 * 60 * 60 * 1000, path: '/api/v1' })
+      res.status(201).json({ accessToken: signAccessToken(user, config), user })
+    } catch (error) {
+      if (error instanceof RegistrationConflictError) {
+        res.status(409).json({ error: error.code })
+        return
+      }
+      throw error
+    }
   })
 
   app.post('/api/v1/auth/local-session', async (_req, res) => {
