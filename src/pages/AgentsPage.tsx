@@ -30,6 +30,7 @@ export function AgentsPage() {
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null)
   const [copied, setCopied] = useState(false)
   const [showEnrollment, setShowEnrollment] = useState(false)
+  const [agentToRevoke, setAgentToRevoke] = useState<Agent | null>(null)
   const query = useQuery({
     queryKey: ['agents'],
     queryFn: async () => {
@@ -44,7 +45,10 @@ export function AgentsPage() {
       const response = await fetch(`/api/v1/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
       if (!response.ok) throw new Error('Could not revoke agent access.')
     },
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['agents'] }),
+    onSuccess: () => {
+      setAgentToRevoke(null)
+      void queryClient.invalidateQueries({ queryKey: ['agents'] })
+    },
   })
   const enroll = useMutation({
     mutationFn: async (name: string) => {
@@ -70,7 +74,6 @@ export function AgentsPage() {
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-2xl font-semibold text-fg">Servers</h1><p className="mt-1 text-sm text-fg-muted">One lightweight agent finds Docker, systemd and PM2 projects automatically.</p></div>
       {canRevoke && <button onClick={() => { setEnrollment(null); setEnrollmentName(''); setShowEnrollment(true) }} className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-accent px-3 text-sm font-semibold text-[#04150e]"><Plus className="h-4 w-4" />Add server</button>}
     </div>
-    {revoke.isError && <p className="mt-4 text-sm text-danger">{revoke.error.message}</p>}
     <div className="mt-6 grid gap-4 md:grid-cols-2">
       {agents.map((agent) => {
         const online = agent.lastSeenAt && now - Date.parse(agent.lastSeenAt) < 60_000
@@ -80,7 +83,7 @@ export function AgentsPage() {
             <div className="min-w-0 flex-1"><h2 className="truncate font-semibold text-fg">{agent.name}</h2><p className="truncate text-sm text-fg-muted">{agent.hostname}</p></div>
             {canRevoke && <button
               disabled={revoke.isPending}
-              onClick={() => { if (window.confirm(`Revoke ${agent.name}? The host will no longer be able to report or execute commands.`)) revoke.mutate(agent.id) }}
+              onClick={() => { revoke.reset(); setAgentToRevoke(agent) }}
               title="Revoke agent access"
               className="rounded-lg border border-danger/30 p-2 text-danger hover:bg-danger/10 disabled:opacity-50"
             ><Trash2 className="h-4 w-4" /></button>}
@@ -92,7 +95,12 @@ export function AgentsPage() {
     </div>
     {canRevoke && showEnrollment && !enrollment && <EnrollmentDialog name={enrollmentName} setName={setEnrollmentName} submit={() => enroll.mutate(enrollmentName)} pending={enroll.isPending} error={enroll.error?.message} close={() => setShowEnrollment(false)} />}
     {canRevoke && enrollment && <EnrollmentResult enrollment={enrollment} command={command} copied={copied} copy={async () => { await navigator.clipboard.writeText(command); setCopied(true) }} close={() => { setEnrollment(null); setShowEnrollment(false) }} />}
+    {canRevoke && agentToRevoke && <RevokeAgentDialog agent={agentToRevoke} pending={revoke.isPending} error={revoke.error?.message} confirm={() => revoke.mutate(agentToRevoke.id)} close={() => { if (!revoke.isPending) setAgentToRevoke(null) }} />}
   </div>
+}
+
+function RevokeAgentDialog({ agent, pending, error, confirm, close }: { agent: Agent; pending: boolean; error?: string; confirm: () => void; close: () => void }) {
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"><div role="alertdialog" aria-modal="true" aria-labelledby="revoke-agent-title" className="w-full max-w-md rounded-2xl border border-border bg-surface p-5 shadow-2xl"><div className="flex items-center justify-between"><h2 id="revoke-agent-title" className="text-lg font-semibold text-fg">Remove {agent.name}?</h2><button type="button" onClick={close} disabled={pending} aria-label="Close" className="text-fg-faint hover:text-fg disabled:opacity-50"><X className="h-5 w-5" /></button></div><p className="mt-2 text-sm text-fg-muted">This server will stop reporting data and executing commands. Projects on the server will not be stopped or deleted.</p>{error && <p className="mt-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</p>}<div className="mt-5 flex justify-end gap-2"><button type="button" onClick={close} disabled={pending} className="h-9 rounded-lg border border-border bg-surface-2 px-3 text-sm text-fg disabled:opacity-50">Cancel</button><button type="button" onClick={confirm} disabled={pending} className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-danger px-3 text-sm font-semibold text-white disabled:opacity-50"><Trash2 className="h-4 w-4" />{pending ? 'Removing…' : 'Remove server'}</button></div></div></div>
 }
 
 function EnrollmentDialog({ name, setName, submit, pending, error, close }: { name: string; setName: (value: string) => void; submit: () => void; pending: boolean; error?: string; close: () => void }) {
