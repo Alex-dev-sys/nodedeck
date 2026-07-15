@@ -27,7 +27,7 @@ export function ManagedServicePage() {
   if (!service) return <div className="rounded-xl border border-border bg-surface p-8 text-center text-sm text-fg-muted">This service is no longer reported by a connected server.</div>
 
   return <div className="space-y-6">
-    <PanelHeader service={service} tagline={service.composeProject ? `Compose · ${service.composeProject}` : 'Docker container'} />
+    <PanelHeader service={service} tagline={service.composeProject ? `Docker Compose · ${service.composeProject}` : service.kind === 'systemd' ? 'systemd service' : service.kind === 'pm2' ? 'PM2 process' : 'Docker container'} />
 
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
       <div className="space-y-5">
@@ -42,10 +42,12 @@ export function ManagedServicePage() {
             <Row label="Restarts" value={String(service.restartCount)} />
             <Row label="Runtime" value={service.runtimeState || 'unknown'} />
             <Row label="Healthcheck" value={service.healthStatus || 'not configured'} />
-            <Row label="Container" value={service.container ? service.container.slice(0, 12) : '—'} mono />
+            <Row label="Source" value={service.kind} />
+            {service.kind === 'docker' && !service.composeProject && <Row label="Container" value={service.container ? service.container.slice(0, 12) : '—'} mono />}
             {service.composeService && <Row label="Compose service" value={service.composeService} />}
             {(service.ports?.length ?? 0) > 0 && <Row label="Ports" value={service.ports!.join(', ')} mono />}
             {service.protected && <Row label="Control" value="Protected" />}
+            {!service.managed && !service.protected && <Row label="Control" value="Monitoring only" />}
           </div>
         </Card>
       </div>

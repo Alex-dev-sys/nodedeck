@@ -17,6 +17,8 @@ function defaultCustom(kind: ServiceKind): ServiceSettings['custom'] {
   switch (kind) {
     case 'nginx': return { rateLimit: 120, bodyLimitMb: 16, forceHttps: true }
     case 'docker': return { pruneAfterDays: 14, containerLimit: 24, autoUpdate: false }
+    case 'systemd': return {}
+    case 'pm2': return {}
     case 'postgres': return { connectionCap: 100, sharedBuffersMb: 1024, backupEveryHours: 6 }
     case 'redis': return { maxMemoryMb: 512, evictionPolicy: 'allkeys-lru', snapshotEveryMin: 30 }
     case 'api': return { rateLimit: 300, timeoutSec: 30, maintenanceMode: false }

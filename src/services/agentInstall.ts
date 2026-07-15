@@ -11,7 +11,6 @@ export function buildAgentInstallCommand(enrollmentToken: string, controlUrl: st
 command -v curl >/dev/null 2>&1 || { echo 'curl is required' >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { echo 'tar is required' >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo 'jq is required' >&2; exit 1; }
-command -v docker >/dev/null 2>&1 || { echo 'Docker CLI is required' >&2; exit 1; }
 
 NODEDECK_DIR=$(mktemp -d)
 cleanup() { rm -rf "$NODEDECK_DIR"; }

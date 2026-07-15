@@ -19,6 +19,10 @@ export function ServiceActions({
   const busy = service.status === 'restarting'
   const down = service.status === 'offline'
 
+  if (!service.managed) {
+    return <span className={cn('rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-[11px] text-fg-faint', className)}>Monitor only</span>
+  }
+
   const run = (a: ServiceAction) => (e: React.MouseEvent) => {
     e.stopPropagation()
     if (service.protected) {

@@ -69,7 +69,7 @@ export function AlertsPage() {
       kind: alert.kind === 'command_failed' ? 'critical' : 'warning',
       title: alert.title,
       body: alert.details.message
-        ?? (alert.kind === 'service_offline' ? `${alert.details.name ?? 'Container'} is not running.`
+        ?? (alert.kind === 'service_offline' ? `${alert.details.name ?? 'Service'} is not running.`
           : alert.kind === 'host_resource_high' ? `CPU ${alert.details.cpu ?? 0}% · RAM ${alert.details.ram ?? 0}% · Disk ${alert.details.disk ?? 0}%`
             : alert.details.lastSeenAt ? `Last seen: ${new Date(alert.details.lastSeenAt).toLocaleString()}` : 'The agent has not sent a recent heartbeat.'),
       ts: alert.openedAt,

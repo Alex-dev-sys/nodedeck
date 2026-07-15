@@ -22,7 +22,7 @@ export function HeroPanel({ summary }: { summary: InfraSummary }) {
           {summary.online}/{summary.total} services online
         </div>
         <motion.h1 key={headline} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="max-w-xl text-[28px] font-bold leading-tight tracking-tight text-fg lg:text-[32px]">{headline}</motion.h1>
-        <p className="mt-2 max-w-lg text-[14px] text-fg-muted">{calm ? 'Every connected agent currently reports its services as available.' : 'Review the affected containers below and choose a safe recovery action.'}</p>
+        <p className="mt-2 max-w-lg text-[14px] text-fg-muted">{calm ? 'Every connected agent currently reports its projects as available.' : 'Review the affected projects below and choose a safe recovery action.'}</p>
         <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Stat icon={<Activity className="h-4 w-4" />} label="Online" value={summary.online} />
           <Stat icon={<TriangleAlert className="h-4 w-4" />} label="Degraded" value={summary.degraded} tone={summary.degraded ? '#fbbf24' : undefined} />

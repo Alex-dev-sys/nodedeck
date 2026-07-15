@@ -28,6 +28,7 @@ const inventorySchema = z.object({
   services: z.array(z.object({
     id: z.string().min(1).max(128),
     name: z.string().min(1).max(255),
+    kind: z.enum(['docker', 'systemd', 'pm2']).default('docker'),
     image: z.string().min(1).max(512),
     status: z.enum(['healthy', 'degraded', 'restarting', 'updating', 'offline']),
     cpu: z.coerce.number().min(0).max(100).optional(),
@@ -103,7 +104,9 @@ async function snapshot(pool: Pool, organizationId: string) {
               s.restart_count AS "restartCount",
               CASE WHEN s.started_at IS NULL THEN NULL ELSE GREATEST(0, EXTRACT(EPOCH FROM (now() - s.started_at)))::bigint END AS "uptimeSec",
               s.compose_project AS "composeProject", s.compose_service AS "composeService", s.ports,
-              s.is_protected AS "protected", s.updated_at AS "updatedAt"
+              s.is_protected AS "protected",
+              (s.kind = 'docker' AND s.compose_project IS NULL AND s.container_id IS NOT NULL) AS managed,
+              s.updated_at AS "updatedAt"
        FROM services s JOIN agents a ON a.id = s.agent_id
        WHERE s.organization_id = $1 AND a.revoked_at IS NULL AND s.runtime_state IS DISTINCT FROM 'missing'
        ORDER BY s.name`,
@@ -464,9 +467,9 @@ export function createApp(config: Config, pool: Pool) {
              id, organization_id, agent_id, container_id, name, kind, status, hostname, version, cpu, ram,
              runtime_state, health_status, restart_count, started_at, compose_project, compose_service, ports, is_protected
            )
-           VALUES ($1, $2, $3, $4, $5, 'docker', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19)
            ON CONFLICT (agent_id, container_id) WHERE container_id IS NOT NULL DO UPDATE SET
-             name = EXCLUDED.name, status = EXCLUDED.status,
+             name = EXCLUDED.name, kind = EXCLUDED.kind, status = EXCLUDED.status,
              hostname = EXCLUDED.hostname, version = EXCLUDED.version, cpu = EXCLUDED.cpu, ram = EXCLUDED.ram,
              runtime_state = EXCLUDED.runtime_state, health_status = EXCLUDED.health_status,
              restart_count = EXCLUDED.restart_count, started_at = EXCLUDED.started_at,
@@ -474,7 +477,7 @@ export function createApp(config: Config, pool: Pool) {
              ports = EXCLUDED.ports, is_protected = EXCLUDED.is_protected, updated_at = now()
            RETURNING id`,
           [
-            `docker-${current.id}-${service.id}`, current.organizationId, current.id, service.id, service.name, service.status,
+            `resource-${current.id}-${tokenHash(service.id).slice(0, 24)}`, current.organizationId, current.id, service.id, service.name, service.kind, service.status,
             current.hostname, service.image, service.cpu ?? null, service.ram ?? null,
             service.runtimeState ?? null, service.healthStatus ?? null, service.restartCount ?? 0,
             service.startedAt ?? null, service.composeProject ?? null, service.composeService ?? null,
@@ -484,12 +487,12 @@ export function createApp(config: Config, pool: Pool) {
         const serviceId = stored.rows[0].id
         if (service.status === 'offline' || service.status === 'degraded') {
           const kind = service.status === 'degraded' ? 'service_unhealthy' : 'service_offline'
-          const title = service.status === 'degraded' ? 'Docker healthcheck is failing' : 'Docker service is offline'
+          const title = service.status === 'degraded' ? `${service.name} is degraded` : `${service.name} is offline`
           await client.query(
             `INSERT INTO alert_events (organization_id, agent_id, service_id, kind, title, details)
              VALUES ($1, $2, $3, $4, $5, $6::jsonb)
              ON CONFLICT (service_id, kind) WHERE status = 'open' AND service_id IS NOT NULL DO NOTHING`,
-            [current.organizationId, current.id, serviceId, kind, title, JSON.stringify({ name: service.name, containerId: service.id, healthStatus: service.healthStatus })],
+            [current.organizationId, current.id, serviceId, kind, title, JSON.stringify({ name: service.name, resourceKey: service.id, source: service.kind, healthStatus: service.healthStatus })],
           )
         }
         await client.query(`UPDATE alert_events SET status = 'resolved', resolved_at = now()
@@ -497,16 +500,17 @@ export function createApp(config: Config, pool: Pool) {
         await client.query(`UPDATE alert_events SET status = 'resolved', resolved_at = now()
           WHERE service_id = $1 AND kind = 'service_unhealthy' AND status = 'open' AND $2 <> 'degraded'`, [serviceId, service.status])
       }
-      const containerIds = services.map((service) => service.id)
+      const resourceKeys = services.map((service) => service.id)
       await client.query(
         `UPDATE services SET status = 'offline', runtime_state = 'missing', cpu = 0, ram = 0, updated_at = now()
          WHERE agent_id = $1 AND container_id IS NOT NULL AND NOT (container_id = ANY($2::text[]))`,
-        [current.id, containerIds],
+        [current.id, resourceKeys],
       )
       await client.query(
         `INSERT INTO alert_events (organization_id, agent_id, service_id, kind, title, details)
-         SELECT organization_id, agent_id, id, 'service_offline', 'Docker service disappeared from inventory', jsonb_build_object('name', name, 'containerId', container_id)
+         SELECT organization_id, agent_id, id, 'service_offline', 'Service disappeared from inventory', jsonb_build_object('name', name, 'resourceKey', container_id, 'source', kind)
          FROM services WHERE agent_id = $1 AND runtime_state = 'missing'
+           AND (compose_project IS NULL OR container_id LIKE 'docker-compose:%')
          ON CONFLICT (service_id, kind) WHERE status = 'open' AND service_id IS NOT NULL DO NOTHING`,
         [current.id],
       )
@@ -674,8 +678,9 @@ export function createApp(config: Config, pool: Pool) {
       const idempotencyKey = req.header('idempotency-key')
       if (idempotencyKey && !/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) return res.status(400).json({ error: 'invalid_idempotency_key' })
       const command = await inTransaction(pool, async (client) => {
-        const service = await client.query<{ id: string; agentId: string | null; agentOnline: boolean; protected: boolean }>(
+        const service = await client.query<{ id: string; agentId: string | null; agentOnline: boolean; protected: boolean; managed: boolean }>(
           `SELECT s.id, s.agent_id AS "agentId", s.is_protected AS protected,
+                  (s.kind = 'docker' AND s.compose_project IS NULL AND s.container_id IS NOT NULL) AS managed,
                   (a.revoked_at IS NULL AND a.last_seen_at >= now() - interval '60 seconds') AS "agentOnline"
            FROM services s LEFT JOIN agents a ON a.id = s.agent_id
            WHERE s.id = $1 AND s.organization_id = $2 FOR UPDATE OF s`,
@@ -683,6 +688,7 @@ export function createApp(config: Config, pool: Pool) {
         )
         if (!service.rowCount) return null
         if (!service.rows[0].agentId) return 'unmanaged' as const
+        if (!service.rows[0].managed) return 'unmanaged' as const
         if (!service.rows[0].agentOnline) return 'agent_offline' as const
         if (service.rows[0].protected) return 'protected' as const
 

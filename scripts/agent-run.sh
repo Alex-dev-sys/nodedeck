@@ -16,28 +16,32 @@ esac
 
 "$ROOT_DIR/agent-heartbeat.sh" &
 HEARTBEAT_PID=$!
-"$ROOT_DIR/agent-commands.sh" &
-COMMAND_PID=$!
-(
-  while :; do
-    "$ROOT_DIR/agent-logs.sh" || echo "Server-OS log collection failed; retrying on the next interval" >&2
-    sleep "$LOGS_INTERVAL"
-  done
-) &
-LOGS_PID=$!
+COMMAND_PID=
+LOGS_PID=
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  "$ROOT_DIR/agent-commands.sh" &
+  COMMAND_PID=$!
+  (
+    while :; do
+      "$ROOT_DIR/agent-logs.sh" || echo "NodeDeck log collection failed; retrying on the next interval" >&2
+      sleep "$LOGS_INTERVAL"
+    done
+  ) &
+  LOGS_PID=$!
+fi
 
 cleanup() {
   kill "$HEARTBEAT_PID" 2>/dev/null || true
-  kill "$COMMAND_PID" 2>/dev/null || true
-  kill "$LOGS_PID" 2>/dev/null || true
+  [ -z "$COMMAND_PID" ] || kill "$COMMAND_PID" 2>/dev/null || true
+  [ -z "$LOGS_PID" ] || kill "$LOGS_PID" 2>/dev/null || true
   wait "$HEARTBEAT_PID" 2>/dev/null || true
-  wait "$COMMAND_PID" 2>/dev/null || true
-  wait "$LOGS_PID" 2>/dev/null || true
+  [ -z "$COMMAND_PID" ] || wait "$COMMAND_PID" 2>/dev/null || true
+  [ -z "$LOGS_PID" ] || wait "$LOGS_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-echo "Server-OS agent runner started; inventory every ${INVENTORY_INTERVAL}s, logs every ${LOGS_INTERVAL}s"
+echo "NodeDeck agent runner started; inventory every ${INVENTORY_INTERVAL}s"
 while :; do
-  "$ROOT_DIR/agent-inventory.sh" || echo "Server-OS inventory failed; retrying on the next interval" >&2
+  "$ROOT_DIR/agent-inventory.sh" || echo "NodeDeck inventory failed; retrying on the next interval" >&2
   sleep "$INVENTORY_INTERVAL"
 done

@@ -41,6 +41,7 @@ interface BackendService {
   composeService?: string | null
   ports?: string[] | null
   protected?: boolean | null
+  managed?: boolean | null
   updatedAt: string
 }
 
@@ -107,6 +108,8 @@ const serviceKinds: readonly ServiceKind[] = [
   'redis',
   'nginx',
   'docker',
+  'systemd',
+  'pm2',
   'backup',
   'monitoring',
   'vpn',
@@ -152,6 +155,7 @@ function toService(row: BackendService): Service {
     composeService: row.composeService ?? undefined,
     ports: row.ports ?? [],
     protected: row.protected ?? false,
+    managed: row.managed ?? false,
   }
 }
 

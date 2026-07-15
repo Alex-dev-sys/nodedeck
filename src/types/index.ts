@@ -18,6 +18,8 @@ export type ServiceKind =
   | 'redis'
   | 'nginx'
   | 'docker'
+  | 'systemd'
+  | 'pm2'
   | 'backup'
   | 'monitoring'
   | 'vpn'
@@ -64,6 +66,7 @@ export interface Service {
   composeService?: string
   ports?: string[]
   protected?: boolean
+  managed?: boolean
 }
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low'

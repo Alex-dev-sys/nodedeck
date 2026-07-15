@@ -1,3 +1,8 @@
+x-nodedeck-labels: &nodedeck-labels
+  io.nodedeck.project.key: infra-dashboard
+  io.nodedeck.project.name: Infra Dashboard
+  io.nodedeck.protected: "true"
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -7,6 +12,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - infra-postgres:/var/lib/postgresql/data
+    labels: *nodedeck-labels
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U infra -d infra_dashboard"]
       interval: 5s
@@ -35,6 +41,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    labels: *nodedeck-labels
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
@@ -50,6 +57,7 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    labels: *nodedeck-labels
 
 volumes:
   infra-postgres:

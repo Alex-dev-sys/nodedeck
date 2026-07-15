@@ -69,7 +69,7 @@ export function ServiceCard({ service, index = 0 }: { service: Service; index?: 
         <Signal icon={<Cpu className="h-3.5 w-3.5" />} label="CPU" value={service.metrics.cpu} display={pct(down ? 0 : service.metrics.cpu)} />
         <Signal icon={<MemoryStick className="h-3.5 w-3.5" />} label="RAM" value={service.metrics.ram} display={pct(down ? 0 : service.metrics.ram)} />
         {apiMode === 'production' ? <div className="flex min-w-0 items-center gap-2 text-[12px]">
-          <span className="w-14 shrink-0 text-fg-faint">Image</span>
+          <span className="w-14 shrink-0 text-fg-faint">{service.kind === 'docker' ? 'Image' : 'Runtime'}</span>
           <span className="truncate font-mono text-fg-muted" title={service.version}>{service.version || '—'}</span>
         </div> : <div className="flex items-center gap-2 text-[12px]">
           <span className="flex w-14 items-center gap-1.5 text-fg-faint">
@@ -83,7 +83,7 @@ export function ServiceCard({ service, index = 0 }: { service: Service; index?: 
 
       <div className="relative mt-4 flex items-center justify-between border-t border-border-soft pt-3">
         <span className="text-[11px] text-fg-faint">
-          {service.composeProject ? `${service.composeProject} · ` : ''}{service.restartCount} restarts{service.protected ? ' · protected' : ''}
+          {service.kind}{service.composeProject ? ` · ${service.composeProject}` : ''}{service.protected ? ' · protected' : ''}
         </span>
         <ServiceActions service={service} size="sm" />
       </div>

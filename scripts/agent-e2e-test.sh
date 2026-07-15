@@ -44,7 +44,9 @@ container_id=$(docker ps -a --no-trunc --filter "name=^/${TEST_CONTAINER}$" --fo
 curl --fail --silent --show-error --request POST "$BASE_URL/agent/v1/inventory" \
   --header "Authorization: Agent $agent_token" --header 'Content-Type: application/json' \
   --data "{\"services\":[{\"id\":\"${container_id}\",\"name\":\"${TEST_CONTAINER}\",\"image\":\"node:22-alpine\",\"status\":\"offline\",\"cpu\":0,\"ram\":0,\"runtimeState\":\"created\",\"healthStatus\":\"none\",\"restartCount\":0,\"ports\":[],\"protected\":false}]}" >/dev/null
-service_id="docker-${container_id}"
+service_id=$(curl --fail --silent --show-error "$BASE_URL/api/v1/services" --header "Authorization: Bearer $token" \
+  | jq -r --arg resource "$container_id" '.services[] | select(.containerId == $resource) | .id' | head -n 1)
+[ -n "$service_id" ] || { echo "Discovered container was not returned by the API" >&2; exit 1; }
 offline_alert=$(curl --fail --silent --show-error "$BASE_URL/api/v1/alerts" --header "Authorization: Bearer $token" \
   | jq -r --arg service "$service_id" '.alerts[] | select(.serviceId == $service and .kind == "service_offline" and .status == "open") | .id' | head -n 1)
 [ -n "$offline_alert" ] || { echo "Offline container did not create an alert" >&2; exit 1; }

@@ -18,12 +18,13 @@ describe('toInfraSnapshot', () => {
           updatedAt: '2026-07-10T11:00:00.000Z',
         },
         {
-          id: 'unknown',
-          name: 'Unknown',
-          kind: 'not-yet-supported',
-          status: 'broken',
+          id: 'bot',
+          name: 'Telegram Bot',
+          kind: 'systemd',
+          status: 'healthy',
           hostname: 'host-01',
-          version: '1.0.0',
+          version: 'user systemd service',
+          managed: false,
           updatedAt: '2026-07-10T11:00:00.000Z',
         },
       ],
@@ -32,9 +33,9 @@ describe('toInfraSnapshot', () => {
 
     expect(snapshot.services).toMatchObject([
       { id: 'api', kind: 'api', status: 'healthy', metrics: { cpu: 23.5, ram: 41.2 } },
-      { id: 'unknown', kind: 'api', status: 'offline' },
+      { id: 'bot', kind: 'systemd', status: 'healthy', managed: false },
     ])
-    expect(snapshot.summary).toMatchObject({ total: 2, online: 1, offline: 1, healthScore: 50 })
+    expect(snapshot.summary).toMatchObject({ total: 2, online: 2, offline: 0, healthScore: 100 })
   })
 })
 

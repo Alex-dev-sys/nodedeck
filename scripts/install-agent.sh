@@ -9,7 +9,6 @@ PLIST="$HOME/Library/LaunchAgents/com.server-os.agent.plist"
 CONFIG_FILE="$STATE_DIR/agent.env"
 BIN_DIR="$STATE_DIR/bin"
 
-command -v docker >/dev/null 2>&1 || { echo "Docker CLI is required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
 umask 077
@@ -50,8 +49,8 @@ SERVICE_FILE="$SYSTEMD_DIR/server-os-agent.service"
 mkdir -p "$SYSTEMD_DIR"
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Server-OS Docker Agent
-After=network-online.target docker.service
+Description=NodeDeck Server Agent
+After=network-online.target
 Wants=network-online.target
 
 [Service]

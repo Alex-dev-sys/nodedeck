@@ -11,6 +11,7 @@ describe('buildAgentInstallCommand', () => {
     expect(command).toContain("SERVER_OS_CONTROL_URL='https://nodedeck.example'")
     expect(command).toContain('"$NODEDECK_DIR/scripts/install-agent.sh"')
     expect(command).not.toContain(' ./scripts/install-agent.sh')
+    expect(command).not.toContain('Docker CLI is required')
   })
 
   it('quotes enrollment values before placing them in a shell command', () => {

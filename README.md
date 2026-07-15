@@ -1,8 +1,9 @@
 # NodeDeck
 
-NodeDeck is a local control plane for Docker hosts. It provides a React dashboard,
-an Express/PostgreSQL API, and a restricted local agent that inventories containers,
-collects recent logs, and performs only `start`, `stop`, and `restart` commands.
+NodeDeck is a lightweight control plane for server projects. It provides a React dashboard,
+an Express/PostgreSQL API, and a restricted local agent that discovers Docker Compose projects,
+standalone containers, custom systemd services, and PM2 processes without creating duplicate
+entries. Remote control is currently limited to standalone Docker containers.
 
 ## Local release
 
@@ -23,14 +24,14 @@ For a TLS deployment, set `COOKIE_SECURE=true`, set `CORS_ORIGIN` to the public 
 and put TLS termination in front of the web container.
 Set `HOST_ALERT_THRESHOLD` (50–100, default `90`) to control when CPU, RAM, or disk usage opens a host alert.
 
-## Connect a Docker host
+## Connect a server
 
 1. Sign in, open **Agents**, and click **Enroll agent**.
 2. Copy the generated one-time enrollment command; it exchanges the token with `POST /agent/v1/enroll`.
-3. Run the agent from this checked-out release:
+3. Paste the generated command into any terminal. For local development from a checkout, use:
 
 ```sh
-SERVER_OS_AGENT_TOKEN="$AGENT_TOKEN" ./scripts/install-agent.sh
+SERVER_OS_CONTROL_URL="http://127.0.0.1:8081" SERVER_OS_AGENT_TOKEN="$AGENT_TOKEN" ./scripts/install-agent.sh
 ```
 
 Update an already enrolled agent without creating a new token:
@@ -39,17 +40,17 @@ Update an already enrolled agent without creating a new token:
 ./scripts/update-agent.sh
 ```
 
-It sends a heartbeat every 20 seconds, Docker inventory every 60 seconds, and a bounded,
-redacted log batch every 60 seconds. Only a host-local Docker CLI is used; the browser never
-sends a container ID or shell command directly to Docker.
+It sends a heartbeat every 20 seconds and a deduplicated inventory every 60 seconds. Docker is
+optional. When Docker is available, the agent also sends a bounded, redacted log batch every
+60 seconds. The browser never sends a shell command directly to the host.
 
 Owners and admins can revoke an agent from **Agents**. Revocation immediately invalidates its
 credential and marks its managed services offline; it never stops or deletes containers on the host.
 
 ### Start on macOS automatically
 
-The repository must remain at its current path because the LaunchAgent starts its scripts there.
-With Docker Desktop running:
+The installer copies the agent into `~/.server-os-agent`, so the repository can be moved or removed
+after installation. Docker Desktop is only required when Docker projects should be discovered:
 
 ```sh
 SERVER_OS_AGENT_TOKEN="$AGENT_TOKEN" \

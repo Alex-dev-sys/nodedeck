@@ -65,7 +65,7 @@ function DrawerBody({ service, onClose }: { service: Service; onClose: () => voi
             <h2 className="truncate text-lg font-semibold text-fg">{service.name}</h2>
             <StatusDot status={service.status} />
           </div>
-          <div className="mt-0.5 truncate font-mono text-[12px] text-fg-faint" title={service.version}>{service.version || 'Image not reported'}</div>
+          <div className="mt-0.5 truncate font-mono text-[12px] text-fg-faint" title={service.version}>{service.version || 'Runtime not reported'}</div>
         </div>
         <Button size="icon" variant="ghost" onClick={onClose} aria-label="Close"><X className="h-[18px] w-[18px]" /></Button>
       </div>
@@ -88,13 +88,15 @@ function DrawerBody({ service, onClose }: { service: Service; onClose: () => voi
 
         <div className="rounded-[var(--radius-md)] border border-border-soft bg-surface-2 text-[13px]">
           <Row label="Host" value={service.hostname || '—'} />
-          <Row label="Container" value={service.container ? service.container.slice(0, 12) : '—'} mono />
+          <Row label="Source" value={service.kind} />
+          {service.kind === 'docker' && !service.composeProject && <Row label="Container" value={service.container ? service.container.slice(0, 12) : '—'} mono />}
           <Row label="Runtime" value={service.runtimeState || 'unknown'} />
           <Row label="Healthcheck" value={service.healthStatus || 'not configured'} />
           {service.composeProject && <Row label="Compose stack" value={service.composeProject} />}
           {service.composeService && <Row label="Compose service" value={service.composeService} />}
           {(service.ports?.length ?? 0) > 0 && <Row label="Ports" value={service.ports!.join(', ')} mono />}
           {service.protected && <Row label="Control" value="Protected" />}
+          {!service.managed && !service.protected && <Row label="Control" value="Monitoring only" />}
         </div>
 
         <div>
