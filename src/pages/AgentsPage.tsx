@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, Plus, Server, Trash2, Wifi, X } from 'lucide-react'
 import { useState } from 'react'
+import { buildAgentInstallCommand } from '@/services/agentInstall'
 import { useAuth } from '@/stores/auth'
 
 interface Agent {
@@ -63,11 +64,7 @@ export function AgentsPage() {
   const canRevoke = role === 'owner' || role === 'admin'
 
   const controlUrl = typeof window === 'undefined' ? '' : window.location.origin
-  const command = enrollment ? `ENROLLMENT_TOKEN='${enrollment.token}'
-AGENT_TOKEN=$(curl -s -X POST ${controlUrl}/agent/v1/enroll \\
-  -H 'Content-Type: application/json' \\
-  -d "{\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"hostname\\":\\"$(hostname)\\"}" | jq -r .agentToken)
-SERVER_OS_AGENT_TOKEN="$AGENT_TOKEN" ./scripts/install-agent.sh` : ''
+  const command = enrollment ? buildAgentInstallCommand(enrollment.token, controlUrl) : ''
 
   return <div>
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-2xl font-semibold text-fg">Servers</h1><p className="mt-1 text-sm text-fg-muted">Install one lightweight agent on each Docker host.</p></div>
@@ -103,5 +100,5 @@ function EnrollmentDialog({ name, setName, submit, pending, error, close }: { na
 }
 
 function EnrollmentResult({ enrollment, command, copied, copy, close }: { enrollment: Enrollment; command: string; copied: boolean; copy: () => Promise<void>; close: () => void }) {
-  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"><div className="w-full max-w-2xl rounded-2xl border border-border bg-surface p-5 shadow-2xl"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold text-fg">Agent token created</h2><button onClick={close} className="text-fg-faint hover:text-fg"><X className="h-5 w-5" /></button></div><p className="mt-2 text-sm text-warning">Run this from the NodeDeck folder. It installs a background macOS or Linux agent that survives terminal closes and restarts.</p><p className="mt-1 text-sm text-fg-muted">The enrollment token expires at {new Date(enrollment.expiresAt).toLocaleString()} and cannot be shown again.</p><pre className="mt-4 overflow-x-auto rounded-lg border border-border bg-[#0b0c10] p-3 text-xs text-fg-muted"><code>{command}</code></pre><button onClick={() => void copy()} className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-surface-2 px-3 text-sm text-fg hover:border-fg-faint">{copied ? <Check className="h-4 w-4 text-accent" /> : <Copy className="h-4 w-4" />}{copied ? 'Copied' : 'Copy command'}</button></div></div>
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"><div className="w-full max-w-2xl rounded-2xl border border-border bg-surface p-5 shadow-2xl"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold text-fg">Agent token created</h2><button onClick={close} className="text-fg-faint hover:text-fg"><X className="h-5 w-5" /></button></div><p className="mt-2 text-sm text-warning">Paste this command into Terminal on the server. It works from any folder and installs a background macOS or Linux agent.</p><p className="mt-1 text-sm text-fg-muted">The enrollment token expires at {new Date(enrollment.expiresAt).toLocaleString()} and cannot be shown again.</p><pre className="mt-4 max-h-80 overflow-auto rounded-lg border border-border bg-[#0b0c10] p-3 text-xs text-fg-muted"><code>{command}</code></pre><button onClick={() => void copy()} className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-surface-2 px-3 text-sm text-fg hover:border-fg-faint">{copied ? <Check className="h-4 w-4 text-accent" /> : <Copy className="h-4 w-4" />}{copied ? 'Copied' : 'Copy command'}</button></div></div>
 }
