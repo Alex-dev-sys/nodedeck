@@ -3,7 +3,7 @@ set -eu
 
 ENROLLMENT_TOKEN=${1:-}
 CONTROL_URL=${2:-}
-AGENT_RELEASE_REF=45b3e5edcafbb7a81f95312609c5eabe170bb3a0
+AGENT_RELEASE_REF=bfa064711ae7d2721e7f83cc07b32b47792a735d
 ARCHIVE_URL="https://github.com/Alex-dev-sys/nodedeck/archive/${AGENT_RELEASE_REF}.tar.gz"
 
 [ -n "$ENROLLMENT_TOKEN" ] || { echo "Missing one-time enrollment token." >&2; exit 1; }
