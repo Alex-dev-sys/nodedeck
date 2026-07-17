@@ -31,6 +31,7 @@ NodeDeck redacts common password, bearer-token, API-key, and database-URL patter
 - Use an HTTPS control-plane URL and `COOKIE_SECURE=true`.
 - Use a unique, randomly generated `JWT_SECRET` and `CRON_SECRET`; never commit `.env` files.
 - Use TLS certificate verification for remote Postgres connections.
+- Supabase connections pin the public Supabase Root 2021 CA (SHA-256 `80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA`). Review Supabase's current root before this certificate expires in April 2031.
 - Keep the pinned agent release current and review changes before updating the pin.
 - Review Supabase security advisors, Vercel runtime errors, dependency audit results, and failed authentication traffic before every release.
 - Rotate any credential immediately if it appears in a terminal recording, issue, chat, log, or build artifact.

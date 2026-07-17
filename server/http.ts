@@ -47,10 +47,13 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
     res.status(status).json({ error: code, requestId: (req as AuthenticatedRequest).requestId })
     return
   }
+  const unsafeCode = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
+  const code = typeof unsafeCode === 'string' && /^[A-Z0-9_]{1,64}$/.test(unsafeCode) ? unsafeCode : undefined
   console.error(JSON.stringify({
     event: 'request.failed',
     requestId: (req as AuthenticatedRequest).requestId,
     error: error instanceof Error ? error.name : 'unknown',
+    ...(code ? { code } : {}),
   }))
   res.status(500).json({ error: 'internal_server_error', requestId: (req as AuthenticatedRequest).requestId })
 }
