@@ -132,6 +132,53 @@ systemd_services=$(
 ) || true
 systemd_services=$(printf '%s\n' "$systemd_services" | jq -s 'unique_by(.id)')
 
+collect_launchd_services() {
+  if [ "$(uname -s)" = Darwin ] && command -v launchctl >/dev/null 2>&1 && command -v plutil >/dev/null 2>&1; then
+    launchd_dir="$HOME/Library/LaunchAgents"
+    if [ -d "$launchd_dir" ]; then
+      for plist in "$launchd_dir"/*.plist; do
+        [ -e "$plist" ] || continue
+        label=$(plutil -extract Label raw -o - "$plist" 2>/dev/null || true)
+        [ -n "$label" ] || continue
+        [ "${#label}" -le 114 ] || continue
+        case "$label" in
+          com.server-os.agent|com.nodedeck.agent|pm2.*|*.pm2.*) continue ;;
+        esac
+
+        details=$(launchctl print "gui/$(id -u)/$label" 2>/dev/null || true)
+        state=$(printf '%s\n' "$details" | sed -n 's/^[[:space:]]*state = //p' | head -n 1)
+        [ "$state" = running ] || continue
+        pid=$(printf '%s\n' "$details" | sed -n 's/^[[:space:]]*pid = //p' | head -n 1)
+        case "$pid" in *[!0-9]*|'') pid= ;; esac
+
+        program=$(plutil -extract Program raw -o - "$plist" 2>/dev/null || true)
+        [ -n "$program" ] || program=$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)
+        [ -n "$program" ] || program="macOS LaunchAgent"
+        program=$(printf '%.512s' "$program")
+
+        cpu=0
+        ram=0
+        if [ -n "$pid" ]; then
+          metrics=$(ps -p "$pid" -o %cpu= -o %mem= 2>/dev/null | awk 'NR == 1 { print $1, $2 }')
+          cpu=$(printf '%s\n' "$metrics" | awk '{ print $1 + 0 }')
+          ram=$(printf '%s\n' "$metrics" | awk '{ print $2 + 0 }')
+        fi
+
+        jq -n \
+          --arg id "launchd-user:$label" \
+          --arg name "$label" \
+          --arg image "$program" \
+          --arg runtimeState "$state" \
+          --argjson cpu "$(awk -v value="$cpu" 'BEGIN { capped = value > 100 ? 100 : value; print capped }')" \
+          --argjson ram "$(awk -v value="$ram" 'BEGIN { capped = value > 100 ? 100 : value; print capped }')" \
+          '{id:$id,name:$name,kind:"launchd",image:$image,status:"healthy",cpu:$cpu,ram:$ram,runtimeState:$runtimeState,healthStatus:"none",restartCount:0,ports:[],protected:false}'
+      done
+    fi
+  fi
+}
+launchd_services=$(collect_launchd_services) || true
+launchd_services=$(printf '%s\n' "$launchd_services" | jq -s 'unique_by(.id)')
+
 pm2_services='[]'
 if command -v pm2 >/dev/null 2>&1; then
   pm2_services=$(pm2 jlist 2>/dev/null | jq '[.[] |
@@ -156,8 +203,9 @@ fi
 payload=$(jq -n \
   --argjson docker "$docker_services" \
   --argjson systemd "$systemd_services" \
+  --argjson launchd "$launchd_services" \
   --argjson pm2 "$pm2_services" \
-  '{services: (($docker + $systemd + $pm2) | unique_by(.id))}')
+  '{services: (($docker + $systemd + $launchd + $pm2) | unique_by(.id))}')
 
 if [ "${SERVER_OS_INVENTORY_DRY_RUN:-false}" = true ]; then
   printf '%s\n' "$payload"

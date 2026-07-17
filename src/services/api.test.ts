@@ -30,6 +30,16 @@ describe('toInfraSnapshot', () => {
           managed: false,
           updatedAt: '2026-07-10T11:00:00.000Z',
         },
+        {
+          id: 'postgres-mac',
+          name: 'homebrew.mxcl.postgresql@16',
+          kind: 'launchd',
+          status: 'healthy',
+          hostname: 'mac-01',
+          version: '/opt/homebrew/bin/postgres',
+          managed: false,
+          updatedAt: '2026-07-10T11:00:00.000Z',
+        },
       ],
       incidents: [],
     })
@@ -37,8 +47,9 @@ describe('toInfraSnapshot', () => {
     expect(snapshot.services).toMatchObject([
       { id: 'api', kind: 'api', status: 'healthy', metrics: { cpu: 23.5, ram: 41.2 }, controlEnabled: false, autoRecovery: true, desiredState: 'stopped' },
       { id: 'bot', kind: 'systemd', status: 'healthy', managed: false },
+      { id: 'postgres-mac', kind: 'launchd', status: 'healthy', managed: false },
     ])
-    expect(snapshot.summary).toMatchObject({ total: 2, online: 2, offline: 0, healthScore: 100 })
+    expect(snapshot.summary).toMatchObject({ total: 3, online: 3, offline: 0, healthScore: 100 })
   })
 })
 

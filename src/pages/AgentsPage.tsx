@@ -71,7 +71,7 @@ export function AgentsPage() {
   const command = enrollment ? buildAgentInstallCommand(enrollment.token, controlUrl) : ''
 
   return <div>
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-2xl font-semibold text-fg">Servers</h1><p className="mt-1 text-sm text-fg-muted">One lightweight agent finds Docker, systemd and PM2 projects automatically.</p></div>
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-2xl font-semibold text-fg">Servers</h1><p className="mt-1 text-sm text-fg-muted">One lightweight agent finds Docker, Compose, systemd, PM2 and macOS services automatically.</p></div>
       {canRevoke && <button onClick={() => { setEnrollment(null); setEnrollmentName(''); setShowEnrollment(true) }} className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-accent px-3 text-sm font-semibold text-[#04150e]"><Plus className="h-4 w-4" />Add server</button>}
     </div>
     <div className="mt-6 grid gap-4 md:grid-cols-2">

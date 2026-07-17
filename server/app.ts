@@ -37,7 +37,7 @@ const inventorySchema = z.object({
   services: z.array(z.object({
     id: z.string().min(1).max(128),
     name: z.string().min(1).max(255),
-    kind: z.enum(['docker', 'systemd', 'pm2']).default('docker'),
+    kind: z.enum(['docker', 'systemd', 'launchd', 'pm2']).default('docker'),
     image: z.string().min(1).max(512),
     status: z.enum(['healthy', 'degraded', 'restarting', 'updating', 'offline']),
     cpu: z.coerce.number().min(0).max(100).optional(),

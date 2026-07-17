@@ -49,7 +49,9 @@ credential and marks its managed services offline; it never stops or deletes con
 
 NodeDeck can start, stop, and restart standalone Docker containers, whole Docker Compose projects,
 user-level systemd services, and PM2 processes. System-level systemd units stay monitoring-only,
-and the NodeDeck control plane is protected from managing itself.
+and the NodeDeck control plane is protected from managing itself. On macOS, running user
+LaunchAgents are discovered automatically as monitoring-only services; NodeDeck, PM2, and idle
+jobs are excluded so they do not duplicate or clutter the project list.
 
 ### Start on macOS automatically
 

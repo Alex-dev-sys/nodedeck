@@ -28,6 +28,7 @@ export const kindIcon: Record<ServiceKind, LucideIcon> = {
   nginx: Network,
   docker: Container,
   systemd: ServerCog,
+  launchd: ServerCog,
   pm2: Workflow,
   backup: Archive,
   monitoring: Activity,

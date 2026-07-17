@@ -39,6 +39,7 @@ esac
       encoding: 'utf8',
       env: {
         ...process.env,
+        HOME: directory,
         PATH: `${directory}:${process.env.PATH ?? ''}`,
         SERVER_OS_AGENT_TOKEN: 'test-token',
         SERVER_OS_INVENTORY_DRY_RUN: 'true',
@@ -102,5 +103,74 @@ printf '%s\\n' '[{"pm_id":7,"name":"worker","pm2_env":{"status":"online","pm_exe
       expect.objectContaining({ id: 'systemd-user:telegram-bot.service', name: 'Telegram Bot', kind: 'systemd', status: 'healthy' }),
       expect.objectContaining({ id: 'pm2:7', name: 'worker', kind: 'pm2', status: 'healthy' }),
     ]))
+  })
+
+  it('discovers running macOS LaunchAgents without updater or runtime duplicates', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'nodedeck-launchd-inventory-'))
+    temporaryDirectories.push(directory)
+    const launchDirectory = join(directory, 'Library', 'LaunchAgents')
+    mkdirSync(launchDirectory, { recursive: true })
+    for (const label of ['ai.hermes.gateway', 'homebrew.mxcl.postgresql@16', 'com.google.updater', 'com.server-os.agent', 'pm2.user']) {
+      writeFileSync(join(launchDirectory, `${label}.plist`), '<plist/>')
+    }
+
+    const docker = join(directory, 'docker')
+    writeFileSync(docker, '#!/bin/sh\nexit 1\n')
+    chmodSync(docker, 0o755)
+    const uname = join(directory, 'uname')
+    writeFileSync(uname, '#!/bin/sh\nprintf "%s\\n" Darwin\n')
+    chmodSync(uname, 0o755)
+    const plutil = join(directory, 'plutil')
+    writeFileSync(plutil, `#!/bin/sh
+last=
+for argument in "$@"; do last=$argument; done
+label=$(basename "$last" .plist)
+case "$2" in
+  Label) printf '%s\\n' "$label" ;;
+  Program)
+    case "$label" in
+      ai.hermes.gateway) printf '%s\\n' '/Users/test/hermes' ;;
+      homebrew.mxcl.postgresql@16) printf '%s\\n' '/opt/homebrew/bin/postgres' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+`)
+    chmodSync(plutil, 0o755)
+    const launchctl = join(directory, 'launchctl')
+    writeFileSync(launchctl, `#!/bin/sh
+case "$2" in
+  *ai.hermes.gateway|*homebrew.mxcl.postgresql@16|*com.server-os.agent|*pm2.user)
+    printf '%s\\n' '    state = running' '    pid = 4242'
+    ;;
+  *) printf '%s\\n' '    state = not running' ;;
+esac
+`)
+    chmodSync(launchctl, 0o755)
+    const ps = join(directory, 'ps')
+    writeFileSync(ps, '#!/bin/sh\nprintf "%s\\n" "2.5 1.5"\n')
+    chmodSync(ps, 0o755)
+    const pm2 = join(directory, 'pm2')
+    writeFileSync(pm2, '#!/bin/sh\nprintf "%s\\n" "[]"\n')
+    chmodSync(pm2, 0o755)
+
+    const result = spawnSync(inventoryScript, [], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: directory,
+        PATH: `${directory}:${process.env.PATH ?? ''}`,
+        SERVER_OS_AGENT_TOKEN: 'test-token',
+        SERVER_OS_INVENTORY_DRY_RUN: 'true',
+      },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    const payload = JSON.parse(result.stdout) as { services: Array<Record<string, unknown>> }
+    expect(payload.services.filter((service) => service.kind === 'launchd')).toEqual([
+      expect.objectContaining({ id: 'launchd-user:ai.hermes.gateway', name: 'ai.hermes.gateway', status: 'healthy', cpu: 2.5, ram: 1.5 }),
+      expect.objectContaining({ id: 'launchd-user:homebrew.mxcl.postgresql@16', name: 'homebrew.mxcl.postgresql@16', status: 'healthy', cpu: 2.5, ram: 1.5 }),
+    ])
   })
 })

@@ -112,6 +112,7 @@ const serviceKinds: readonly ServiceKind[] = [
   'nginx',
   'docker',
   'systemd',
+  'launchd',
   'pm2',
   'backup',
   'monitoring',
