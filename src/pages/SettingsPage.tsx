@@ -83,8 +83,8 @@ export function SettingsPage() {
           <p className="mt-1 text-[12px] text-fg-muted">Secrets are encrypted before they are stored.</p>
           <form onSubmit={submit} className="mt-5 space-y-4">
             <div className="grid grid-cols-2 gap-2">
-              <button type="button" onClick={() => setKind('telegram')} className={`rounded-xl border p-3 text-left ${kind === 'telegram' ? 'border-accent/50 bg-accent/10 text-fg' : 'border-border text-fg-muted'}`}><Bot className="mb-2 h-4 w-4" /><span className="text-sm font-medium">Telegram</span></button>
-              <button type="button" onClick={() => setKind('webhook')} className={`rounded-xl border p-3 text-left ${kind === 'webhook' ? 'border-accent/50 bg-accent/10 text-fg' : 'border-border text-fg-muted'}`}><Webhook className="mb-2 h-4 w-4" /><span className="text-sm font-medium">Webhook</span></button>
+              <button type="button" onClick={() => { setKind('telegram'); create.reset() }} className={`rounded-xl border p-3 text-left ${kind === 'telegram' ? 'border-accent/50 bg-accent/10 text-fg' : 'border-border text-fg-muted'}`}><Bot className="mb-2 h-4 w-4" /><span className="text-sm font-medium">Telegram</span></button>
+              <button type="button" onClick={() => { setKind('webhook'); create.reset() }} className={`rounded-xl border p-3 text-left ${kind === 'webhook' ? 'border-accent/50 bg-accent/10 text-fg' : 'border-border text-fg-muted'}`}><Webhook className="mb-2 h-4 w-4" /><span className="text-sm font-medium">Webhook</span></button>
             </div>
             <Field label="Name"><input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder={kind === 'telegram' ? 'Ops Telegram' : 'Discord / Slack'} className="field" /></Field>
             {kind === 'telegram' ? <>
