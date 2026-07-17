@@ -8,6 +8,7 @@ import type { Config } from './config.js'
 import { inTransaction } from './db/pool.js'
 import { publishSnapshotChanged, subscribeSnapshotChanged } from './events.js'
 import { errorHandler, requireAuth, requireRole, type AuthenticatedRequest } from './http.js'
+import { deliverPendingNotifications } from './maintenance.js'
 import { sendNotification, validateWebhookUrl, type NotificationChannelConfig } from './notifications.js'
 import { registerOwner, RegistrationConflictError, registrationSchema } from './registration.js'
 import { openSecret, sealSecret } from './secrets.js'
@@ -401,12 +402,21 @@ export function createApp(config: Config, pool: Pool) {
     res.json({ channels: channels.rows })
   })
 
-  app.post('/api/v1/notification-channels', requireAuth(config), requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res) => {
+  app.post('/api/v1/notification-channels', requireAuth(config), requireRole('owner', 'admin'), rateLimit(pool, {
+    scope: 'ui.notification_create', limit: 10, windowSeconds: 60 * 60, key: (req: AuthenticatedRequest) => req.user!.id,
+  }), async (req: AuthenticatedRequest, res) => {
     const user = req.user!
     const input = notificationChannelSchema.parse(req.body)
     const channelConfig: NotificationChannelConfig = input.kind === 'telegram'
       ? { kind: 'telegram', botToken: input.botToken, chatId: input.chatId }
       : { kind: 'webhook', url: validateWebhookUrl(input.url) }
+    await sendNotification(channelConfig, {
+      id: randomBytes(16).toString('hex'),
+      kind: 'connection_test',
+      title: 'NodeDeck notifications connected',
+      details: { message: 'This test confirms that NodeDeck can reach this channel.' },
+      openedAt: new Date().toISOString(),
+    })
     const target = input.kind === 'telegram' ? `Chat ${input.chatId}` : new URL(channelConfig.kind === 'webhook' ? channelConfig.url : '').host
     const channel = await pool.query(
       `INSERT INTO notification_channels (organization_id, kind, name, target, config_encrypted, created_by)
@@ -419,7 +429,7 @@ export function createApp(config: Config, pool: Pool) {
        VALUES ($1, $2, 'notification_channel.create', $3, 'ok')`,
       [user.organizationId, user.id, channel.rows[0].id],
     )
-    res.status(201).json({ channel: channel.rows[0] })
+    res.status(201).json({ channel: channel.rows[0], testDelivered: true })
   })
 
   app.post('/api/v1/notification-channels/:channelId/test', requireAuth(config), requireRole('owner', 'admin'), rateLimit(pool, {
@@ -541,6 +551,7 @@ export function createApp(config: Config, pool: Pool) {
         WHERE agent_id = $1 AND kind = 'host_resource_high' AND status = 'open'`, [result.rows[0].id])
     }
     publishSnapshotChanged(result.rows[0].organizationId)
+    await deliverPendingNotifications(pool, config)
     res.status(204).end()
   })
 
@@ -556,7 +567,8 @@ export function createApp(config: Config, pool: Pool) {
     )
     const current = agent.rows[0]
     if (!current) return res.status(401).json({ error: 'invalid_agent_token' })
-    await inTransaction(pool, async (client) => {
+    const openedAlerts = await inTransaction(pool, async (client) => {
+      let opened = false
       for (const service of services) {
         const stored = await client.query<{ id: string }>(
           `INSERT INTO services (
@@ -584,12 +596,13 @@ export function createApp(config: Config, pool: Pool) {
         if (service.status === 'offline' || service.status === 'degraded') {
           const kind = service.status === 'degraded' ? 'service_unhealthy' : 'service_offline'
           const title = service.status === 'degraded' ? `${service.name} is degraded` : `${service.name} is offline`
-          await client.query(
+          const created = await client.query(
             `INSERT INTO alert_events (organization_id, agent_id, service_id, kind, title, details)
              VALUES ($1, $2, $3, $4, $5, $6::jsonb)
              ON CONFLICT (service_id, kind) WHERE status = 'open' AND service_id IS NOT NULL DO NOTHING`,
             [current.organizationId, current.id, serviceId, kind, title, JSON.stringify({ name: service.name, resourceKey: service.id, source: service.kind, healthStatus: service.healthStatus })],
           )
+          opened ||= Boolean(created.rowCount)
         }
         await client.query(`UPDATE alert_events SET status = 'resolved', resolved_at = now()
           WHERE service_id = $1 AND kind = 'service_offline' AND status = 'open' AND $2 <> 'offline'`, [serviceId, service.status])
@@ -597,7 +610,7 @@ export function createApp(config: Config, pool: Pool) {
           WHERE service_id = $1 AND kind = 'service_unhealthy' AND status = 'open' AND $2 <> 'degraded'`, [serviceId, service.status])
       }
       const resourceKeys = services.map((service) => service.id)
-      await client.query(
+      const resourceAlerts = await client.query(
         `INSERT INTO alert_events (organization_id, agent_id, service_id, kind, title, details)
          SELECT s.organization_id, s.agent_id, s.id, 'service_resource_high', 'Service resource usage is high',
                 jsonb_build_object('name', COALESCE(p.display_name, s.name), 'cpu', s.cpu, 'ram', s.ram,
@@ -608,6 +621,7 @@ export function createApp(config: Config, pool: Pool) {
          ON CONFLICT (service_id, kind) WHERE status = 'open' AND service_id IS NOT NULL DO NOTHING`,
         [current.id, resourceKeys],
       )
+      opened ||= Boolean(resourceAlerts.rowCount)
       await client.query(
         `UPDATE alert_events a SET status = 'resolved', resolved_at = now()
          FROM services s JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
@@ -650,7 +664,7 @@ export function createApp(config: Config, pool: Pool) {
          WHERE agent_id = $1 AND container_id IS NOT NULL AND NOT (container_id = ANY($2::text[]))`,
         [current.id, resourceKeys],
       )
-      await client.query(
+      const disappearedAlerts = await client.query(
         `INSERT INTO alert_events (organization_id, agent_id, service_id, kind, title, details)
          SELECT organization_id, agent_id, id, 'service_offline', 'Service disappeared from inventory', jsonb_build_object('name', name, 'resourceKey', container_id, 'source', kind)
          FROM services WHERE agent_id = $1 AND runtime_state = 'missing'
@@ -658,9 +672,12 @@ export function createApp(config: Config, pool: Pool) {
          ON CONFLICT (service_id, kind) WHERE status = 'open' AND service_id IS NOT NULL DO NOTHING`,
         [current.id],
       )
+      opened ||= Boolean(disappearedAlerts.rowCount)
       await client.query('UPDATE agents SET last_seen_at = now() WHERE id = $1', [current.id])
+      return opened
     })
     publishSnapshotChanged(current.organizationId)
+    if (openedAlerts) await deliverPendingNotifications(pool, config)
     res.status(204).end()
   })
 
@@ -711,6 +728,7 @@ export function createApp(config: Config, pool: Pool) {
       [updated.rows[0].organizationId, updated.rows[0].agentId, updated.rows[0].id, JSON.stringify({ message: message ?? '' })],
     )
     publishSnapshotChanged(updated.rows[0].organizationId)
+    if (!ok) await deliverPendingNotifications(pool, config)
     res.status(204).end()
   })
 

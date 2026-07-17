@@ -63,7 +63,7 @@ export async function deliverPendingNotifications(pool: Pool, config: Config) {
      ORDER BY a.opened_at LIMIT 20`,
   )
 
-  for (const item of pending.rows) {
+  await Promise.all(pending.rows.map(async (item) => {
     const claimed = await pool.query(
       `INSERT INTO notification_deliveries (alert_id, channel_id, status, attempts)
        VALUES ($1, $2, 'sending', 1)
@@ -73,7 +73,7 @@ export async function deliverPendingNotifications(pool: Pool, config: Config) {
        RETURNING alert_id`,
       [item.id, item.channelId],
     )
-    if (!claimed.rowCount) continue
+    if (!claimed.rowCount) return
     try {
       await sendNotification(decryptChannel(item.encryptedConfig, config), item)
       await pool.query(
@@ -86,7 +86,7 @@ export async function deliverPendingNotifications(pool: Pool, config: Config) {
         [item.id, item.channelId, error instanceof Error ? error.message.slice(0, 500) : 'Notification delivery failed'],
       )
     }
-  }
+  }))
 }
 
 export function startMaintenance(pool: Pool, config: Config) {

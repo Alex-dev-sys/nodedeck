@@ -37,7 +37,7 @@ export function SettingsPage() {
     onSuccess: () => {
       setName(''); setBotToken(''); setChatId(''); setUrl('')
       void queryClient.invalidateQueries({ queryKey: ['notification-channels'] })
-      pushToast({ title: 'Notifications connected', message: 'New alerts will be delivered automatically.', tone: 'success' })
+      pushToast({ title: 'Notifications connected', message: 'The test arrived, and new alerts will be delivered automatically.', tone: 'success' })
     },
   })
   const remove = useMutation({
@@ -90,9 +90,13 @@ export function SettingsPage() {
             {kind === 'telegram' ? <>
               <Field label="Bot token"><input required type="password" autoComplete="off" value={botToken} onChange={(event) => setBotToken(event.target.value)} placeholder="123456:ABC…" className="field" /></Field>
               <Field label="Chat ID"><input required value={chatId} onChange={(event) => setChatId(event.target.value)} placeholder="-1001234567890" className="field" /></Field>
-            </> : <Field label="HTTPS webhook URL"><input required type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://…" className="field" /></Field>}
+              <p className="text-[12px] leading-5 text-fg-muted">Open your bot in Telegram and press <span className="font-medium text-fg">Start</span> before connecting. For a group, add the bot to that group first.</p>
+            </> : <>
+              <Field label="HTTPS webhook URL"><input required type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://…" className="field" /></Field>
+              <p className="text-[12px] leading-5 text-fg-muted">Works with Slack, Discord, and custom public HTTPS endpoints. NodeDeck sends a test before saving.</p>
+            </>}
             {create.isError && <p className="text-[12px] text-danger">{create.error.message}</p>}
-            <Button variant="primary" className="w-full" disabled={create.isPending}><Plus className="h-4 w-4" />{create.isPending ? 'Connecting…' : 'Connect'}</Button>
+            <Button type="submit" variant="primary" className="w-full" disabled={create.isPending}><Plus className="h-4 w-4" />{create.isPending ? 'Sending test…' : 'Connect & test'}</Button>
           </form>
         </Card>}
       </div>

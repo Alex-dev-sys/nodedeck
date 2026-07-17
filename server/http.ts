@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { ZodError } from 'zod'
 import type { Config } from './config.js'
 import { verifyAccessToken, type AuthUser, type Role } from './auth.js'
+import { NotificationDeliveryError } from './notifications.js'
 
 export interface AuthenticatedRequest extends Request {
   user?: AuthUser
@@ -37,6 +38,16 @@ export function requireRole(...roles: Role[]) {
 export function errorHandler(error: unknown, req: Request, res: Response, _next: NextFunction) {
   if (error instanceof ZodError) {
     res.status(400).json({ error: 'invalid_request', details: error.flatten(), requestId: (req as AuthenticatedRequest).requestId })
+    return
+  }
+  if (error instanceof NotificationDeliveryError) {
+    console.warn(JSON.stringify({
+      event: 'notification.delivery_failed',
+      requestId: (req as AuthenticatedRequest).requestId,
+      channelKind: error.channelKind,
+      ...(error.providerStatus ? { providerStatus: error.providerStatus } : {}),
+    }))
+    res.status(error.status).json({ error: error.code, message: error.message, requestId: (req as AuthenticatedRequest).requestId })
     return
   }
   const status = typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number'
