@@ -9,6 +9,7 @@ command -v docker >/dev/null 2>&1 || { echo "Docker is required. Install Docker 
 docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required." >&2; exit 1; }
 command -v openssl >/dev/null 2>&1 || { echo "openssl is required to generate installation secrets." >&2; exit 1; }
 
+umask 077
 mkdir -p "$INSTALL_DIR"
 tar -C "$SOURCE_DIR" --exclude='./node_modules' --exclude='./dist' --exclude='./.git' --exclude='./.env' -cf - . | tar -C "$INSTALL_DIR" -xf -
 
@@ -34,6 +35,7 @@ WEB_PORT=8080
 EOF
   printf '\nInfra Dashboard owner: %s\nInitial password: %s\nURL: http://127.0.0.1:8080\n\n' "$OWNER_EMAIL" "$BOOTSTRAP_PASSWORD"
 fi
+chmod 600 "$ENV_FILE"
 
 docker compose --env-file "$ENV_FILE" -f "$INSTALL_DIR/docker-compose.yml" up -d --build
 echo "Infra Dashboard is running."

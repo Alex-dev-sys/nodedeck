@@ -5,7 +5,7 @@ export function createPool(config: Config) {
   return new Pool({
     connectionString: config.DATABASE_URL,
     max: config.DATABASE_POOL_MAX,
-    ssl: config.DATABASE_SSL ? { rejectUnauthorized: false } : undefined,
+    ssl: config.DATABASE_SSL ? { rejectUnauthorized: true } : undefined,
     idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: 10_000,
   })

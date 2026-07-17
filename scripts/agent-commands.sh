@@ -10,7 +10,7 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
 backoff=1
 while :; do
-  response=$(curl --silent --show-error --write-out '\n%{http_code}' --request POST "${CONTROL_URL}/agent/v1/commands/next" --header "Authorization: Agent ${SERVER_OS_AGENT_TOKEN}") || response='\n000'
+  response=$("$ROOT_DIR/agent-http.sh" --silent --show-error --write-out '\n%{http_code}' --request POST "${CONTROL_URL}/agent/v1/commands/next") || response='\n000'
   body=$(printf '%s' "$response" | sed '$d')
   status=$(printf '%s' "$response" | tail -n 1)
   if [ "$status" = 200 ]; then
@@ -25,7 +25,7 @@ while :; do
       ok=false
     fi
     payload=$(printf '%s' "$result" | jq --argjson ok "$ok" '. + {ok:$ok}')
-    curl --fail --silent --show-error --request POST "${CONTROL_URL}/agent/v1/commands/${id}/result" --header "Authorization: Agent ${SERVER_OS_AGENT_TOKEN}" --header 'Content-Type: application/json' --data "$payload" || true
+    "$ROOT_DIR/agent-http.sh" --fail --silent --show-error --request POST "${CONTROL_URL}/agent/v1/commands/${id}/result" --header 'Content-Type: application/json' --data "$payload" || true
   elif [ "$status" != 204 ]; then
     echo "Server-OS command poll failed (HTTP ${status}); retrying in ${backoff}s" >&2
     sleep "$backoff"

@@ -1,9 +1,9 @@
 import cors from 'cors'
 import { createHash, randomBytes } from 'node:crypto'
-import express, { type Response } from 'express'
+import express, { type Request, type Response } from 'express'
 import type { Pool } from 'pg'
 import { z } from 'zod'
-import { createRefreshToken, hashRefreshToken, signAccessToken, verifyAccessToken, verifyPassword, type Role } from './auth.js'
+import { createRefreshToken, hashRefreshToken, signAccessToken, verifyAccessToken, verifyPasswordOrDummy, type Role } from './auth.js'
 import type { Config } from './config.js'
 import { inTransaction } from './db/pool.js'
 import { publishSnapshotChanged, subscribeSnapshotChanged } from './events.js'
@@ -11,9 +11,10 @@ import { errorHandler, requireAuth, requireRole, type AuthenticatedRequest } fro
 import { sendNotification, validateWebhookUrl, type NotificationChannelConfig } from './notifications.js'
 import { registerOwner, RegistrationConflictError, registrationSchema } from './registration.js'
 import { openSecret, sealSecret } from './secrets.js'
+import { agentCredentialKey, clientAddress, rateLimit, securityHeaders } from './security.js'
 
-const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) })
-const commandSchema = z.object({ action: z.enum(['start', 'restart', 'stop']) })
+const loginSchema = z.object({ email: z.string().trim().email().max(320), password: z.string().min(1).max(128) }).strict()
+const commandSchema = z.object({ action: z.enum(['start', 'restart', 'stop']) }).strict()
 const servicePolicySchema = z.object({
   displayName: z.string().trim().min(1).max(80).nullable(),
   controlEnabled: z.boolean(),
@@ -21,17 +22,17 @@ const servicePolicySchema = z.object({
   recoveryDelaySec: z.coerce.number().int().min(60).max(900),
   cpuAlertThreshold: z.coerce.number().int().min(50).max(100),
   ramAlertThreshold: z.coerce.number().int().min(50).max(100),
-}).refine((value) => !value.autoRecovery || value.controlEnabled, { message: 'Auto recovery requires remote control to be enabled.', path: ['autoRecovery'] })
-const enrollmentSchema = z.object({ name: z.string().trim().min(1).max(80) })
-const agentEnrollmentSchema = z.object({ token: z.string().min(32), hostname: z.string().trim().min(1).max(255) })
+}).strict().refine((value) => !value.autoRecovery || value.controlEnabled, { message: 'Auto recovery requires remote control to be enabled.', path: ['autoRecovery'] })
+const enrollmentSchema = z.object({ name: z.string().trim().min(1).max(80) }).strict()
+const agentEnrollmentSchema = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/), hostname: z.string().trim().min(1).max(255) }).strict()
 const heartbeatSchema = z.object({
   host: z.object({
     cpu: z.coerce.number().min(0).max(100),
     ram: z.coerce.number().min(0).max(100),
     disk: z.coerce.number().min(0).max(100),
     uptimeSec: z.coerce.number().int().min(0),
-  }).optional(),
-})
+  }).strict().optional(),
+}).strict()
 const inventorySchema = z.object({
   services: z.array(z.object({
     id: z.string().min(1).max(128),
@@ -49,15 +50,15 @@ const inventorySchema = z.object({
     composeService: z.string().max(255).nullable().optional(),
     ports: z.array(z.string().max(255)).max(100).optional(),
     protected: z.boolean().optional(),
-  })).max(500),
-})
+  }).strict()).max(500),
+}).strict()
 const commandResultSchema = z.object({
   ok: z.boolean(),
   message: z.string().max(2000).optional(),
   observedState: z.string().max(32).optional(),
   healthStatus: z.string().max(32).optional(),
-})
-const logBatchSchema = z.object({ entries: z.array(z.object({ containerId: z.string().min(1).max(128), ts: z.string().datetime().optional(), level: z.enum(['info', 'warn', 'error', 'debug']).default('info'), text: z.string().min(1).max(4000) })).max(500) })
+}).strict()
+const logBatchSchema = z.object({ entries: z.array(z.object({ containerId: z.string().min(1).max(128), ts: z.string().datetime().optional(), level: z.enum(['info', 'warn', 'error', 'debug']).default('info'), text: z.string().min(1).max(4000) }).strict()).max(500) }).strict()
 const commandListQuerySchema = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) })
 const logListQuerySchema = z.object({ limit: z.coerce.number().int().min(1).max(200).default(100), serviceId: z.string().min(1).optional() })
 const metricRangeSchema = z.object({ range: z.enum(['15m', '1h', '6h', '24h', '7d', '30d']).default('1h') })
@@ -67,20 +68,64 @@ const notificationChannelSchema = z.discriminatedUnion('kind', [
     name: z.string().trim().min(1).max(80),
     botToken: z.string().trim().min(20).max(255),
     chatId: z.string().trim().min(1).max(100),
-  }),
+  }).strict(),
   z.object({
     kind: z.literal('webhook'),
     name: z.string().trim().min(1).max(80),
     url: z.string().url().max(2000),
-  }),
+  }).strict(),
 ])
+const uuidSchema = z.string().uuid()
+const serviceIdSchema = z.string().min(1).max(128)
 
 function tokenHash(token: string) {
   return createHash('sha256').update(token).digest('hex')
 }
 
+function readAgentToken(req: Request) {
+  const value = req.header('authorization')
+  if (!value?.startsWith('Agent ')) return null
+  const token = value.slice(6)
+  return /^[A-Za-z0-9_-]{32,128}$/.test(token) ? token : null
+}
+
 function readCookie(header: string | undefined, name: string) {
-  return header?.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1)
+  const encoded = header?.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1)
+  if (!encoded) return undefined
+  try {
+    return decodeURIComponent(encoded)
+  } catch {
+    return undefined
+  }
+}
+
+function refreshCookieName(config: Config) {
+  return config.COOKIE_SECURE ? '__Host-nodedeck_refresh' : 'nodedeck_refresh'
+}
+
+function refreshCookie(req: Request, config: Config) {
+  return readCookie(req.header('cookie'), refreshCookieName(config)) ?? readCookie(req.header('cookie'), 'server_os_refresh')
+}
+
+function setRefreshCookie(res: Response, token: string, config: Config) {
+  res.cookie(refreshCookieName(config), token, {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: config.COOKIE_SECURE,
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    path: config.COOKIE_SECURE ? '/' : '/api/v1',
+  })
+}
+
+function clearRefreshCookies(res: Response, config: Config) {
+  res.clearCookie(refreshCookieName(config), {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: config.COOKIE_SECURE,
+    path: config.COOKIE_SECURE ? '/' : '/api/v1',
+  })
+  res.clearCookie('server_os_refresh', { httpOnly: true, sameSite: 'lax', secure: config.COOKIE_SECURE, path: '/api/v1' })
+  res.clearCookie('server_os_refresh', { httpOnly: true, sameSite: 'lax', secure: config.COOKIE_SECURE, path: '/api/v1/auth' })
 }
 
 interface ServiceRow {
@@ -165,6 +210,8 @@ function writeEvent(res: Response, event: string, body: unknown) {
 export function createApp(config: Config, pool: Pool) {
   const app = express()
   app.disable('x-powered-by')
+  app.disable('etag')
+  app.use(securityHeaders)
   app.use(cors({ origin: config.CORS_ORIGIN, credentials: true, methods: ['GET', 'POST', 'PUT', 'DELETE'], allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'] }))
   app.use((req: AuthenticatedRequest, res: Response, next: (error?: unknown) => void) => {
     const supplied = req.header('x-request-id')
@@ -172,7 +219,13 @@ export function createApp(config: Config, pool: Pool) {
     res.setHeader('X-Request-ID', req.requestId)
     next()
   })
-  app.use(express.json({ limit: '16kb' }))
+  app.use(express.json({ limit: '256kb', strict: true }))
+  app.use('/api/v1/auth', rateLimit(pool, {
+    scope: 'auth.ip', limit: 120, windowSeconds: 15 * 60, key: clientAddress,
+  }))
+  app.use('/agent/v1', rateLimit(pool, {
+    scope: 'agent.ip', limit: 180, windowSeconds: 60, key: clientAddress,
+  }))
 
   const requireEventAuth = async (req: AuthenticatedRequest, res: Response, next: (error?: unknown) => void) => {
     const authorization = req.header('authorization')
@@ -186,7 +239,7 @@ export function createApp(config: Config, pool: Pool) {
         return
       }
     }
-    const refreshToken = readCookie(req.header('cookie'), 'server_os_refresh')
+    const refreshToken = refreshCookie(req, config)
     if (!refreshToken) {
       res.status(401).json({ error: 'authentication_required' })
       return
@@ -208,12 +261,17 @@ export function createApp(config: Config, pool: Pool) {
     }
   }
 
-  app.get('/healthz', async (_req, res) => {
+  app.get('/healthz', rateLimit(pool, {
+    scope: 'health.ip', limit: 60, windowSeconds: 60, key: clientAddress,
+  }), async (_req, res) => {
     await pool.query('SELECT 1')
     res.json({ ok: true })
   })
 
-  app.post('/api/v1/auth/login', async (req, res) => {
+  app.post('/api/v1/auth/login', rateLimit(pool, {
+    scope: 'auth.login', limit: 12, windowSeconds: 15 * 60,
+    key: (req) => `${clientAddress(req)}:${typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : 'invalid'}`,
+  }), async (req, res) => {
     const { email, password } = loginSchema.parse(req.body)
     const result = await pool.query<{ id: string; email: string; passwordHash: string; role: 'owner' | 'admin' | 'operator' | 'viewer'; organizationId: string }>(
       `SELECT u.id, u.email, u.password_hash AS "passwordHash", m.role, m.organization_id AS "organizationId"
@@ -225,24 +283,27 @@ export function createApp(config: Config, pool: Pool) {
       [email.toLowerCase()],
     )
     const user = result.rows[0]
-    if (!user || !(await verifyPassword(password, user.passwordHash))) {
+    const passwordValid = await verifyPasswordOrDummy(password, user?.passwordHash)
+    if (!user || !passwordValid) {
       res.status(401).json({ error: 'invalid_credentials' })
       return
     }
     const refreshToken = createRefreshToken()
     await pool.query(`INSERT INTO refresh_sessions (user_id, organization_id, token_hash, expires_at) VALUES ($1, $2, $3, now() + interval '30 days')`, [user.id, user.organizationId, hashRefreshToken(refreshToken)])
-    res.cookie('server_os_refresh', refreshToken, { httpOnly: true, sameSite: 'lax', secure: config.COOKIE_SECURE, maxAge: 30 * 24 * 60 * 60 * 1000, path: '/api/v1' })
+    setRefreshCookie(res, refreshToken, config)
     res.json({
       accessToken: signAccessToken(user, config),
       user: { id: user.id, email: user.email, role: user.role, organizationId: user.organizationId },
     })
   })
 
-  app.post('/api/v1/auth/register', async (req, res) => {
+  app.post('/api/v1/auth/register', rateLimit(pool, {
+    scope: 'auth.register', limit: 5, windowSeconds: 60 * 60, key: clientAddress,
+  }), async (req, res) => {
     const input = registrationSchema.parse(req.body)
     try {
       const { user, refreshToken } = await registerOwner(pool, input)
-      res.cookie('server_os_refresh', refreshToken, { httpOnly: true, sameSite: 'lax', secure: config.COOKIE_SECURE, maxAge: 30 * 24 * 60 * 60 * 1000, path: '/api/v1' })
+      setRefreshCookie(res, refreshToken, config)
       res.status(201).json({ accessToken: signAccessToken(user, config), user })
     } catch (error) {
       if (error instanceof RegistrationConflictError) {
@@ -253,7 +314,9 @@ export function createApp(config: Config, pool: Pool) {
     }
   })
 
-  app.post('/api/v1/auth/local-session', async (_req, res) => {
+  app.post('/api/v1/auth/local-session', rateLimit(pool, {
+    scope: 'auth.local_session', limit: 20, windowSeconds: 15 * 60, key: clientAddress,
+  }), async (_req, res) => {
     if (!config.LOCAL_AUTH_BYPASS) return res.status(404).json({ error: 'local_auth_disabled' })
     if (!config.BOOTSTRAP_EMAIL) return res.status(503).json({ error: 'bootstrap_owner_missing' })
     const result = await pool.query<{ id: string; email: string; role: Role; organizationId: string }>(
@@ -266,12 +329,14 @@ export function createApp(config: Config, pool: Pool) {
     if (!user) return res.status(503).json({ error: 'bootstrap_owner_missing' })
     const refreshToken = createRefreshToken()
     await pool.query(`INSERT INTO refresh_sessions (user_id, organization_id, token_hash, expires_at) VALUES ($1, $2, $3, now() + interval '30 days')`, [user.id, user.organizationId, hashRefreshToken(refreshToken)])
-    res.cookie('server_os_refresh', refreshToken, { httpOnly: true, sameSite: 'lax', secure: config.COOKIE_SECURE, maxAge: 30 * 24 * 60 * 60 * 1000, path: '/api/v1' })
+    setRefreshCookie(res, refreshToken, config)
     res.json({ accessToken: signAccessToken(user, config), user })
   })
 
-  app.post('/api/v1/auth/refresh', async (req, res) => {
-    const token = readCookie(req.header('cookie'), 'server_os_refresh')
+  app.post('/api/v1/auth/refresh', rateLimit(pool, {
+    scope: 'auth.refresh', limit: 60, windowSeconds: 15 * 60, key: clientAddress,
+  }), async (req, res) => {
+    const token = refreshCookie(req, config)
     if (!token) return res.status(401).json({ error: 'refresh_required' })
     const session = await inTransaction(pool, async (client) => {
       const result = await client.query<{ sessionId: string; id: string; email: string; role: Role; organizationId: string }>(
@@ -287,15 +352,14 @@ export function createApp(config: Config, pool: Pool) {
       return { user: { id: current.id, email: current.email, role: current.role, organizationId: current.organizationId }, replacement }
     })
     if (!session) return res.status(401).json({ error: 'invalid_refresh_session' })
-    res.cookie('server_os_refresh', session.replacement, { httpOnly: true, sameSite: 'lax', secure: config.COOKIE_SECURE, maxAge: 30 * 24 * 60 * 60 * 1000, path: '/api/v1' })
+    setRefreshCookie(res, session.replacement, config)
     res.json({ accessToken: signAccessToken(session.user, config), user: session.user })
   })
 
   app.post('/api/v1/auth/logout', async (req, res) => {
-    const token = readCookie(req.header('cookie'), 'server_os_refresh')
+    const token = refreshCookie(req, config)
     if (token) await pool.query('UPDATE refresh_sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL', [hashRefreshToken(token)])
-    res.clearCookie('server_os_refresh', { httpOnly: true, sameSite: 'lax', secure: config.COOKIE_SECURE, path: '/api/v1' })
-    res.clearCookie('server_os_refresh', { httpOnly: true, sameSite: 'lax', secure: config.COOKIE_SECURE, path: '/api/v1/auth' })
+    clearRefreshCookies(res, config)
     res.status(204).end()
   })
 
@@ -303,13 +367,15 @@ export function createApp(config: Config, pool: Pool) {
     res.json({ user: req.user })
   })
 
-  app.post('/api/v1/agent-enrollments', requireAuth(config), requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res) => {
+  app.post('/api/v1/agent-enrollments', requireAuth(config), requireRole('owner', 'admin'), rateLimit(pool, {
+    scope: 'ui.agent_enrollment', limit: 10, windowSeconds: 60 * 60, key: (req: AuthenticatedRequest) => req.user!.id,
+  }), async (req: AuthenticatedRequest, res) => {
     const user = req.user!
     const { name } = enrollmentSchema.parse(req.body)
     const token = randomBytes(32).toString('base64url')
     const result = await pool.query<{ id: string; expiresAt: string }>(
       `INSERT INTO agent_enrollments (organization_id, token_hash, agent_name, created_by, expires_at)
-       VALUES ($1, $2, $3, $4, now() + interval '1 hour')
+       VALUES ($1, $2, $3, $4, now() + interval '15 minutes')
        RETURNING id, expires_at AS "expiresAt"`,
       [user.organizationId, tokenHash(token), name, user.id],
     )
@@ -356,11 +422,14 @@ export function createApp(config: Config, pool: Pool) {
     res.status(201).json({ channel: channel.rows[0] })
   })
 
-  app.post('/api/v1/notification-channels/:channelId/test', requireAuth(config), requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res) => {
+  app.post('/api/v1/notification-channels/:channelId/test', requireAuth(config), requireRole('owner', 'admin'), rateLimit(pool, {
+    scope: 'ui.notification_test', limit: 5, windowSeconds: 5 * 60, key: (req: AuthenticatedRequest) => req.user!.id,
+  }), async (req: AuthenticatedRequest, res) => {
+    const channelId = uuidSchema.parse(req.params.channelId)
     const channel = await pool.query<{ encryptedConfig: string }>(
       `SELECT config_encrypted AS "encryptedConfig" FROM notification_channels
        WHERE id = $1 AND organization_id = $2 AND enabled = true`,
-      [req.params.channelId, req.user!.organizationId],
+      [channelId, req.user!.organizationId],
     )
     if (!channel.rowCount) return res.status(404).json({ error: 'notification_channel_not_found' })
     await sendNotification(openSecret<NotificationChannelConfig>(channel.rows[0].encryptedConfig, config.JWT_SECRET), {
@@ -374,26 +443,28 @@ export function createApp(config: Config, pool: Pool) {
   })
 
   app.delete('/api/v1/notification-channels/:channelId', requireAuth(config), requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res) => {
+    const channelId = uuidSchema.parse(req.params.channelId)
     const deleted = await pool.query(
       `DELETE FROM notification_channels WHERE id = $1 AND organization_id = $2 RETURNING id`,
-      [req.params.channelId, req.user!.organizationId],
+      [channelId, req.user!.organizationId],
     )
     if (!deleted.rowCount) return res.status(404).json({ error: 'notification_channel_not_found' })
     await pool.query(
       `INSERT INTO audit_logs (organization_id, actor_id, action, target, result)
        VALUES ($1, $2, 'notification_channel.delete', $3, 'ok')`,
-      [req.user!.organizationId, req.user!.id, req.params.channelId],
+      [req.user!.organizationId, req.user!.id, channelId],
     )
     res.status(204).end()
   })
 
   app.delete('/api/v1/agents/:agentId', requireAuth(config), requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res) => {
     const user = req.user!
+    const agentId = uuidSchema.parse(req.params.agentId)
     const revoked = await inTransaction(pool, async (client) => {
       const agent = await client.query<{ id: string }>(
         `UPDATE agents SET revoked_at = now(), token_hash = $3
          WHERE id = $1 AND organization_id = $2 AND revoked_at IS NULL RETURNING id`,
-        [req.params.agentId, user.organizationId, tokenHash(randomBytes(32).toString('base64url'))],
+        [agentId, user.organizationId, tokenHash(randomBytes(32).toString('base64url'))],
       )
       if (!agent.rowCount) return false
       await client.query(`UPDATE services SET status = 'offline', cpu = 0, ram = 0, updated_at = now()
@@ -409,7 +480,9 @@ export function createApp(config: Config, pool: Pool) {
     res.status(204).end()
   })
 
-  app.post('/agent/v1/enroll', async (req, res) => {
+  app.post('/agent/v1/enroll', rateLimit(pool, {
+    scope: 'agent.enroll', limit: 20, windowSeconds: 15 * 60, key: clientAddress,
+  }), async (req, res) => {
     const { token, hostname } = agentEnrollmentSchema.parse(req.body)
     const enrollment = await inTransaction(pool, async (client) => {
       const found = await client.query<{ id: string; organizationId: string; agentName: string }>(
@@ -432,15 +505,17 @@ export function createApp(config: Config, pool: Pool) {
     res.status(201).json(enrollment)
   })
 
-  app.post('/agent/v1/heartbeat', async (req, res) => {
+  app.post('/agent/v1/heartbeat', rateLimit(pool, {
+    scope: 'agent.heartbeat', limit: 12, windowSeconds: 60, key: agentCredentialKey,
+  }), async (req, res) => {
     const { host } = heartbeatSchema.parse(req.body)
-    const value = req.header('authorization')
-    if (!value?.startsWith('Agent ')) return res.status(401).json({ error: 'agent_authentication_required' })
+    const agentToken = readAgentToken(req)
+    if (!agentToken) return res.status(401).json({ error: 'agent_authentication_required' })
     const result = await pool.query<{ id: string; organizationId: string }>(
       `UPDATE agents
        SET last_seen_at = now(), host_cpu = $1, host_ram = $2, host_disk = $3, host_uptime_sec = $4
        WHERE token_hash = $5 AND revoked_at IS NULL RETURNING id, organization_id AS "organizationId"`,
-      [host?.cpu ?? null, host?.ram ?? null, host?.disk ?? null, host?.uptimeSec ?? null, tokenHash(value.slice(6))],
+      [host?.cpu ?? null, host?.ram ?? null, host?.disk ?? null, host?.uptimeSec ?? null, tokenHash(agentToken)],
     )
     if (!result.rowCount) return res.status(401).json({ error: 'invalid_agent_token' })
     if (host) {
@@ -469,13 +544,15 @@ export function createApp(config: Config, pool: Pool) {
     res.status(204).end()
   })
 
-  app.post('/agent/v1/inventory', async (req, res) => {
+  app.post('/agent/v1/inventory', rateLimit(pool, {
+    scope: 'agent.inventory', limit: 5, windowSeconds: 60, key: agentCredentialKey,
+  }), async (req, res) => {
     const { services } = inventorySchema.parse(req.body)
-    const value = req.header('authorization')
-    if (!value?.startsWith('Agent ')) return res.status(401).json({ error: 'agent_authentication_required' })
+    const agentToken = readAgentToken(req)
+    if (!agentToken) return res.status(401).json({ error: 'agent_authentication_required' })
     const agent = await pool.query<{ id: string; organizationId: string; hostname: string }>(
       `SELECT id, organization_id AS "organizationId", hostname FROM agents WHERE token_hash = $1 AND revoked_at IS NULL`,
-      [tokenHash(value.slice(6))],
+      [tokenHash(agentToken)],
     )
     const current = agent.rows[0]
     if (!current) return res.status(401).json({ error: 'invalid_agent_token' })
@@ -587,11 +664,13 @@ export function createApp(config: Config, pool: Pool) {
     res.status(204).end()
   })
 
-  app.post('/agent/v1/commands/next', async (req, res) => {
-    const value = req.header('authorization')
-    if (!value?.startsWith('Agent ')) return res.status(401).json({ error: 'agent_authentication_required' })
+  app.post('/agent/v1/commands/next', rateLimit(pool, {
+    scope: 'agent.command_poll', limit: 30, windowSeconds: 60, key: agentCredentialKey,
+  }), async (req, res) => {
+    const agentToken = readAgentToken(req)
+    if (!agentToken) return res.status(401).json({ error: 'agent_authentication_required' })
     const command = await inTransaction(pool, async (client) => {
-      const agent = await client.query<{ id: string }>('SELECT id FROM agents WHERE token_hash = $1 AND revoked_at IS NULL FOR UPDATE', [tokenHash(value.slice(6))])
+      const agent = await client.query<{ id: string }>('SELECT id FROM agents WHERE token_hash = $1 AND revoked_at IS NULL FOR UPDATE', [tokenHash(agentToken)])
       if (!agent.rowCount) return 'invalid' as const
       await client.query(`UPDATE commands SET status = 'expired', completed_at = now(), result = $2::jsonb
         WHERE agent_id = $1 AND status = 'queued' AND expires_at <= now()`, [agent.rows[0].id, JSON.stringify({ message: 'Command expired before the agent claimed it.' })])
@@ -611,15 +690,18 @@ export function createApp(config: Config, pool: Pool) {
     res.json({ command })
   })
 
-  app.post('/agent/v1/commands/:commandId/result', async (req, res) => {
+  app.post('/agent/v1/commands/:commandId/result', rateLimit(pool, {
+    scope: 'agent.command_result', limit: 30, windowSeconds: 60, key: agentCredentialKey,
+  }), async (req, res) => {
     const { ok, message, observedState, healthStatus } = commandResultSchema.parse(req.body)
-    const value = req.header('authorization')
-    if (!value?.startsWith('Agent ')) return res.status(401).json({ error: 'agent_authentication_required' })
+    const commandId = uuidSchema.parse(req.params.commandId)
+    const agentToken = readAgentToken(req)
+    if (!agentToken) return res.status(401).json({ error: 'agent_authentication_required' })
     const updated = await pool.query<{ organizationId: string; agentId: string; id: string }>(
       `UPDATE commands c SET status = $1, completed_at = now(), result = $2::jsonb
        FROM agents a WHERE c.id = $3 AND c.agent_id = a.id AND a.token_hash = $4 AND a.revoked_at IS NULL AND c.status = 'running'
        RETURNING c.organization_id AS "organizationId", c.agent_id AS "agentId", c.id`,
-      [ok ? 'succeeded' : 'failed', JSON.stringify({ message: message ?? '', observedState, healthStatus }), req.params.commandId, tokenHash(value.slice(6))],
+      [ok ? 'succeeded' : 'failed', JSON.stringify({ message: message ?? '', observedState, healthStatus }), commandId, tokenHash(agentToken)],
     )
     if (!updated.rowCount) return res.status(404).json({ error: 'command_not_found' })
     if (!ok) await pool.query(
@@ -632,11 +714,16 @@ export function createApp(config: Config, pool: Pool) {
     res.status(204).end()
   })
 
-  app.post('/agent/v1/logs', async (req, res) => {
+  app.post('/agent/v1/logs', rateLimit(pool, {
+    scope: 'agent.logs', limit: 2, windowSeconds: 60, key: agentCredentialKey,
+  }), rateLimit(pool, {
+    scope: 'agent.logs_daily', limit: 100_000, windowSeconds: 24 * 60 * 60, key: agentCredentialKey,
+    cost: (req) => Array.isArray(req.body?.entries) ? req.body.entries.length : 1,
+  }), async (req, res) => {
     const { entries } = logBatchSchema.parse(req.body)
-    const value = req.header('authorization')
-    if (!value?.startsWith('Agent ')) return res.status(401).json({ error: 'agent_authentication_required' })
-    const agent = await pool.query<{ id: string; organizationId: string }>('SELECT id, organization_id AS "organizationId" FROM agents WHERE token_hash = $1 AND revoked_at IS NULL', [tokenHash(value.slice(6))])
+    const agentToken = readAgentToken(req)
+    if (!agentToken) return res.status(401).json({ error: 'agent_authentication_required' })
+    const agent = await pool.query<{ id: string; organizationId: string }>('SELECT id, organization_id AS "organizationId" FROM agents WHERE token_hash = $1 AND revoked_at IS NULL', [tokenHash(agentToken)])
     if (!agent.rowCount) return res.status(401).json({ error: 'invalid_agent_token' })
     await inTransaction(pool, async (client) => {
       for (const entry of entries) {
@@ -658,6 +745,7 @@ export function createApp(config: Config, pool: Pool) {
   })
 
   app.get('/api/v1/services/:serviceId/settings', requireAuth(config), async (req: AuthenticatedRequest, res) => {
+    const serviceId = serviceIdSchema.parse(req.params.serviceId)
     const settings = await pool.query(
       `SELECT p.display_name AS "displayName", COALESCE(p.control_enabled, true) AS "controlEnabled",
               COALESCE(p.auto_recovery, false) AS "autoRecovery", COALESCE(p.recovery_delay_sec, 120) AS "recoveryDelaySec",
@@ -665,7 +753,7 @@ export function createApp(config: Config, pool: Pool) {
               p.updated_at AS "updatedAt", s.is_protected AS protected
        FROM services s LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
        WHERE s.id = $1 AND s.organization_id = $2`,
-      [req.params.serviceId, req.user!.organizationId],
+      [serviceId, req.user!.organizationId],
     )
     if (!settings.rowCount) return res.status(404).json({ error: 'service_not_found' })
     res.json({ settings: settings.rows[0] })
@@ -678,6 +766,7 @@ export function createApp(config: Config, pool: Pool) {
     async (req: AuthenticatedRequest, res) => {
       const input = servicePolicySchema.parse(req.body)
       const user = req.user!
+      const serviceId = serviceIdSchema.parse(req.params.serviceId)
       const outcome = await inTransaction(pool, async (client) => {
         const service = await client.query<{ id: string; protected: boolean; managed: boolean }>(
           `SELECT s.id, s.is_protected AS protected,
@@ -687,7 +776,7 @@ export function createApp(config: Config, pool: Pool) {
                     OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
                   )) AS managed
            FROM services s WHERE s.id = $1 AND s.organization_id = $2 FOR UPDATE`,
-          [req.params.serviceId, user.organizationId],
+          [serviceId, user.organizationId],
         )
         const current = service.rows[0]
         if (!current) return 'missing' as const
@@ -737,7 +826,8 @@ export function createApp(config: Config, pool: Pool) {
   })
 
   app.get('/api/v1/services/:serviceId/logs', requireAuth(config), async (req: AuthenticatedRequest, res) => {
-    const logs = await pool.query(`SELECT occurred_at AS ts, level, text FROM service_logs WHERE organization_id = $1 AND service_id = $2 ORDER BY occurred_at DESC LIMIT 200`, [req.user!.organizationId, req.params.serviceId])
+    const serviceId = serviceIdSchema.parse(req.params.serviceId)
+    const logs = await pool.query(`SELECT occurred_at AS ts, level, text FROM service_logs WHERE organization_id = $1 AND service_id = $2 ORDER BY occurred_at DESC LIMIT 200`, [req.user!.organizationId, serviceId])
     res.json({ logs: logs.rows })
   })
 
@@ -806,9 +896,14 @@ export function createApp(config: Config, pool: Pool) {
     '/api/v1/services/:serviceId/commands',
     requireAuth(config),
     requireRole('owner', 'admin', 'operator'),
+    rateLimit(pool, {
+      scope: 'ui.service_command', limit: 30, windowSeconds: 60,
+      key: (req) => (req as AuthenticatedRequest).user!.id,
+    }),
     async (req: AuthenticatedRequest, res) => {
       const user = req.user!
       const { action } = commandSchema.parse(req.body)
+      const serviceId = serviceIdSchema.parse(req.params.serviceId)
       const idempotencyKey = req.header('idempotency-key')
       if (idempotencyKey && !/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) return res.status(400).json({ error: 'invalid_idempotency_key' })
       const command = await inTransaction(pool, async (client) => {
@@ -824,7 +919,7 @@ export function createApp(config: Config, pool: Pool) {
            FROM services s LEFT JOIN agents a ON a.id = s.agent_id
            LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
            WHERE s.id = $1 AND s.organization_id = $2 FOR UPDATE OF s`,
-          [req.params.serviceId, user.organizationId],
+          [serviceId, user.organizationId],
         )
         if (!service.rowCount) return null
         if (!service.rows[0].agentId) return 'unmanaged' as const
@@ -838,7 +933,7 @@ export function createApp(config: Config, pool: Pool) {
            VALUES ($1, $2, $3, $4, $5, now() + interval '10 minutes', $6)
            ON CONFLICT (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
            RETURNING id, service_id AS "serviceId", action, status, created_at AS "createdAt", expires_at AS "expiresAt"`,
-          [user.organizationId, service.rows[0].agentId, req.params.serviceId, action, user.id, idempotencyKey ?? null],
+          [user.organizationId, service.rows[0].agentId, serviceId, action, user.id, idempotencyKey ?? null],
         )
         if (!created.rowCount && idempotencyKey) {
           const existing = await client.query(
@@ -846,14 +941,14 @@ export function createApp(config: Config, pool: Pool) {
              FROM commands WHERE organization_id = $1 AND idempotency_key = $2`,
             [user.organizationId, idempotencyKey],
           )
-          await client.query(`UPDATE services SET desired_state = $2 WHERE id = $1 AND organization_id = $3`, [req.params.serviceId, action === 'stop' ? 'stopped' : 'running', user.organizationId])
+          await client.query(`UPDATE services SET desired_state = $2 WHERE id = $1 AND organization_id = $3`, [serviceId, action === 'stop' ? 'stopped' : 'running', user.organizationId])
           return existing.rows[0]
         }
-        await client.query(`UPDATE services SET desired_state = $2 WHERE id = $1 AND organization_id = $3`, [req.params.serviceId, action === 'stop' ? 'stopped' : 'running', user.organizationId])
+        await client.query(`UPDATE services SET desired_state = $2 WHERE id = $1 AND organization_id = $3`, [serviceId, action === 'stop' ? 'stopped' : 'running', user.organizationId])
         await client.query(
           `INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
            VALUES ($1, $2, $3, $4, 'ok', $5::jsonb)`,
-          [user.organizationId, user.id, `service.${action}.requested`, req.params.serviceId, JSON.stringify({ commandId: created.rows[0].id })],
+          [user.organizationId, user.id, `service.${action}.requested`, serviceId, JSON.stringify({ commandId: created.rows[0].id })],
         )
         return created.rows[0]
       })
@@ -877,12 +972,13 @@ export function createApp(config: Config, pool: Pool) {
     requireRole('owner', 'admin', 'operator'),
     async (req: AuthenticatedRequest, res) => {
       const user = req.user!
+      const incidentId = uuidSchema.parse(req.params.incidentId)
       const outcome = await inTransaction(pool, async (client) => {
         const incident = await client.query<{ id: string; serviceStatus: string; resolvedAt: string | null }>(
           `SELECT i.id, i.resolved_at AS "resolvedAt", s.status AS "serviceStatus"
            FROM incidents i JOIN services s ON s.id = i.service_id
            WHERE i.id = $1 AND i.organization_id = $2 AND s.organization_id = $2 FOR UPDATE`,
-          [req.params.incidentId, user.organizationId],
+          [incidentId, user.organizationId],
         )
         const current = incident.rows[0]
         if (!current) return 'missing' as const
@@ -915,6 +1011,7 @@ export function createApp(config: Config, pool: Pool) {
     },
   )
 
+  app.use((_req, res) => res.status(404).json({ error: 'not_found' }))
   app.use(errorHandler)
   return app
 }

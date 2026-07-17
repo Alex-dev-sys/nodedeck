@@ -12,7 +12,7 @@ const schema = z.object({
   COOKIE_SECURE: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   LOCAL_AUTH_BYPASS: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   HOST_ALERT_THRESHOLD: z.coerce.number().min(50).max(100).default(90),
-  CRON_SECRET: z.string().min(32).optional(),
+  CRON_SECRET: z.preprocess((value) => value === '' ? undefined : value, z.string().min(32).optional()),
   BOOTSTRAP_EMAIL: z.string().email().optional(),
   BOOTSTRAP_PASSWORD: z.string().min(12).optional(),
 })
@@ -22,8 +22,15 @@ export type Config = z.infer<typeof schema>
 export function loadConfig(env = process.env): Config {
   const parsed = schema.safeParse(env)
   if (parsed.success) {
-    if (parsed.data.LOCAL_AUTH_BYPASS && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(parsed.data.CORS_ORIGIN)) {
-      throw new Error('LOCAL_AUTH_BYPASS is only allowed for a localhost CORS_ORIGIN')
+    const localOrigin = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(parsed.data.CORS_ORIGIN)
+    if (parsed.data.LOCAL_AUTH_BYPASS && !localOrigin) {
+      throw new Error('LOCAL_AUTH_BYPASS requires a localhost origin')
+    }
+    if (parsed.data.COOKIE_SECURE && !parsed.data.CORS_ORIGIN.startsWith('https://')) {
+      throw new Error('COOKIE_SECURE requires an HTTPS CORS_ORIGIN')
+    }
+    if (!parsed.data.COOKIE_SECURE && !localOrigin) {
+      throw new Error('COOKIE_SECURE must be enabled for a non-local CORS_ORIGIN')
     }
     return parsed.data
   }

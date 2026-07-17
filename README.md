@@ -93,3 +93,7 @@ SERVER_OS_RELEASE_PASSWORD='your-owner-password' ./scripts/release-verify.sh
 ```
 
 GitHub Actions runs these checks plus shell syntax validation on pull requests and `main`.
+
+## Security
+
+Read [SECURITY.md](SECURITY.md) before exposing NodeDeck to the internet or installing an agent on a production Docker host. It documents the trust boundary, agent privileges, required deployment settings, and private vulnerability-reporting process.

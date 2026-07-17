@@ -9,6 +9,21 @@ interface DeliveryRow extends AlertNotification {
 }
 
 export async function runMaintenance(pool: Pool, config: Config) {
+  await pool.query(
+    `WITH expired_limits AS (
+       DELETE FROM private.security_rate_limits WHERE expires_at < now() - interval '1 day'
+     ), old_logs AS (
+       DELETE FROM service_logs WHERE occurred_at < now() - interval '7 days'
+     ), old_metrics AS (
+       DELETE FROM host_metric_samples WHERE recorded_at < now() - interval '30 days'
+     ), old_sessions AS (
+       DELETE FROM refresh_sessions
+       WHERE (expires_at < now() OR revoked_at IS NOT NULL) AND created_at < now() - interval '7 days'
+     ), old_enrollments AS (
+       DELETE FROM agent_enrollments
+       WHERE (expires_at < now() OR used_at IS NOT NULL) AND created_at < now() - interval '7 days'
+     ) SELECT 1`,
+  )
   const offline = await pool.query<{ organizationId: string }>(
     `WITH inserted AS (
        INSERT INTO alert_events (organization_id, agent_id, kind, title, details)

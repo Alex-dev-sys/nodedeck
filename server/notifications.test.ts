@@ -13,6 +13,10 @@ describe('notification delivery', () => {
   it('rejects local and insecure webhook targets', () => {
     expect(() => validateWebhookUrl('http://example.com/hook')).toThrow('HTTPS')
     expect(() => validateWebhookUrl('https://127.0.0.1/hook')).toThrow('Private')
+    expect(() => validateWebhookUrl('https://100.64.0.1/hook')).toThrow('Private')
+    expect(() => validateWebhookUrl('https://[fe90::1]/hook')).toThrow('Private')
+    expect(() => validateWebhookUrl('https://[::ffff:7f00:1]/hook')).toThrow('Private')
+    expect(() => validateWebhookUrl('https://[64:ff9b::7f00:1]/hook')).toThrow('Private')
     expect(() => validateWebhookUrl('https://localhost/hook')).toThrow('Private')
   })
 

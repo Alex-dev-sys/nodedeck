@@ -4,6 +4,7 @@ set -eu
 : "${SERVER_OS_AGENT_TOKEN:?Set SERVER_OS_AGENT_TOKEN before starting the agent}"
 CONTROL_URL=${SERVER_OS_CONTROL_URL:-http://127.0.0.1:8081}
 PROTECTED_PROJECTS=${SERVER_OS_PROTECTED_PROJECTS:-server-os,server-os-stage2,infra-dashboard-release-smoke,infra-dashboard,nodedeck}
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
@@ -163,9 +164,8 @@ if [ "${SERVER_OS_INVENTORY_DRY_RUN:-false}" = true ]; then
   exit 0
 fi
 
-curl --fail --silent --show-error \
+"$ROOT_DIR/agent-http.sh" --fail --silent --show-error \
   --request POST "${CONTROL_URL}/agent/v1/inventory" \
-  --header "Authorization: Agent ${SERVER_OS_AGENT_TOKEN}" \
   --header 'Content-Type: application/json' \
   --data "$payload"
 

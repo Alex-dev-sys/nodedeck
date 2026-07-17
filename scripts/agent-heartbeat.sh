@@ -5,6 +5,7 @@ set -eu
 
 CONTROL_URL=${SERVER_OS_CONTROL_URL:-http://127.0.0.1:8081}
 INTERVAL_SECONDS=${SERVER_OS_HEARTBEAT_INTERVAL:-20}
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 case "$INTERVAL_SECONDS" in
   *[!0-9]*|'') echo "SERVER_OS_HEARTBEAT_INTERVAL must be a positive number" >&2; exit 1 ;;
@@ -52,9 +53,8 @@ while :; do
   [ -n "$UPTIME" ] || UPTIME=0
   [ "$CPU" -le 100 ] 2>/dev/null || CPU=100
   [ "$RAM" -le 100 ] 2>/dev/null || RAM=100
-  if ! curl --fail --silent --show-error \
+  if ! "$ROOT_DIR/agent-http.sh" --fail --silent --show-error \
     --request POST "${CONTROL_URL}/agent/v1/heartbeat" \
-    --header "Authorization: Agent ${SERVER_OS_AGENT_TOKEN}" \
     --header 'Content-Type: application/json' \
     --data "{\"host\":{\"cpu\":${CPU},\"ram\":${RAM},\"disk\":${DISK},\"uptimeSec\":${UPTIME}}}"
   then

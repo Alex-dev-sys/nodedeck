@@ -3,10 +3,16 @@ set -eu
 
 ENROLLMENT_TOKEN=${1:-}
 CONTROL_URL=${2:-}
-ARCHIVE_URL=https://github.com/Alex-dev-sys/nodedeck/archive/refs/heads/main.tar.gz
+AGENT_RELEASE_REF=45b3e5edcafbb7a81f95312609c5eabe170bb3a0
+ARCHIVE_URL="https://github.com/Alex-dev-sys/nodedeck/archive/${AGENT_RELEASE_REF}.tar.gz"
 
 [ -n "$ENROLLMENT_TOKEN" ] || { echo "Missing one-time enrollment token." >&2; exit 1; }
-case "$CONTROL_URL" in http://*|https://*) ;; *) echo "Invalid NodeDeck control URL." >&2; exit 1 ;; esac
+case "$CONTROL_URL" in
+  https://*) ;;
+  http://127.0.0.1|http://127.0.0.1:*|http://localhost|http://localhost:*) ;;
+  *) echo "NodeDeck requires HTTPS for a remote control plane." >&2; exit 1 ;;
+esac
+case "$CONTROL_URL" in *@*) echo "NodeDeck control URL cannot contain credentials." >&2; exit 1 ;; esac
 command -v curl >/dev/null 2>&1 || { echo "curl is required." >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { echo "tar is required." >&2; exit 1; }
 
@@ -37,10 +43,10 @@ cleanup() { rm -rf "$NODEDECK_DIR"; }
 trap cleanup EXIT HUP INT TERM
 
 echo "Downloading NodeDeck agent…"
-curl -fsSL "$ARCHIVE_URL" | tar -xz -C "$NODEDECK_DIR" --strip-components=1
-AGENT_TOKEN=$(curl -fsS -X POST "${CONTROL_URL%/}/agent/v1/enroll" \
+curl --proto '=https' --tlsv1.2 -fsSL "$ARCHIVE_URL" | tar -xz -C "$NODEDECK_DIR" --strip-components=1
+AGENT_TOKEN=$(jq -cn --arg token "$ENROLLMENT_TOKEN" --arg hostname "$(hostname)" '{token: $token, hostname: $hostname}' | curl -fsS -X POST "${CONTROL_URL%/}/agent/v1/enroll" \
   -H 'Content-Type: application/json' \
-  --data "$(jq -cn --arg token "$ENROLLMENT_TOKEN" --arg hostname "$(hostname)" '{token: $token, hostname: $hostname}')" | jq -er .agentToken)
+  --data-binary @- | jq -er .agentToken)
 
 SERVER_OS_CONTROL_URL=${CONTROL_URL%/} \
 SERVER_OS_AGENT_TOKEN=$AGENT_TOKEN \

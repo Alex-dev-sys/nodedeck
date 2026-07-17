@@ -39,11 +39,18 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
     res.status(400).json({ error: 'invalid_request', details: error.flatten(), requestId: (req as AuthenticatedRequest).requestId })
     return
   }
+  const status = typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number'
+    ? error.status
+    : undefined
+  if (status === 400 || status === 413 || status === 415) {
+    const code = status === 413 ? 'payload_too_large' : status === 415 ? 'unsupported_media_type' : 'invalid_json'
+    res.status(status).json({ error: code, requestId: (req as AuthenticatedRequest).requestId })
+    return
+  }
   console.error(JSON.stringify({
     event: 'request.failed',
     requestId: (req as AuthenticatedRequest).requestId,
     error: error instanceof Error ? error.name : 'unknown',
-    message: error instanceof Error ? error.message : undefined,
   }))
   res.status(500).json({ error: 'internal_server_error', requestId: (req as AuthenticatedRequest).requestId })
 }

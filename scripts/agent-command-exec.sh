@@ -41,7 +41,7 @@ docker)
       project_key=${RESOURCE_KEY#docker-compose:}
       all_ids=$(docker ps -aq --no-trunc 2>/dev/null) || fail "Could not list Docker containers."
       [ -n "$all_ids" ] || fail "No containers were found for this Compose project."
-      targets=$(docker inspect $all_ids 2>/dev/null | jq -r --arg desired "$project_key" --arg protected "$PROTECTED_PROJECTS" '
+      targets=$(docker inspect -- $all_ids 2>/dev/null | jq -r --arg desired "$project_key" --arg protected "$PROTECTED_PROJECTS" '
         ($protected | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $protectedProjects |
         .[] | (.Config.Labels // {}) as $labels |
         ($labels["io.nodedeck.project.key"] // null) as $explicitProjectKey |
@@ -57,13 +57,13 @@ docker)
       ;;
   esac
 
-  if ! docker "$ACTION" $targets >>"$OUTPUT_FILE" 2>&1; then
+  if ! docker "$ACTION" -- $targets >>"$OUTPUT_FILE" 2>&1; then
     fail "Docker could not ${ACTION} the selected project."
   fi
 
   attempt=0
   while [ "$attempt" -lt 15 ]; do
-    states=$(docker inspect $targets 2>/dev/null | jq -r '[.[] | {state:(.State.Status // "missing"),health:(.State.Health.Status // "none")}]') || states='[]'
+    states=$(docker inspect -- $targets 2>/dev/null | jq -r '[.[] | {state:(.State.Status // "missing"),health:(.State.Health.Status // "none")}]') || states='[]'
     if [ "$ACTION" = stop ]; then
       ready=$(printf '%s' "$states" | jq -r 'all(.state != "running")')
     else
@@ -86,10 +86,10 @@ systemd)
     *) fail "Invalid systemd resource identifier." ;;
   esac
   case "$unit" in *[!A-Za-z0-9@_.:-]*|'') fail "Invalid systemd unit name." ;; esac
-  if ! systemctl --user "$ACTION" "$unit" >>"$OUTPUT_FILE" 2>&1; then
+  if ! systemctl --user "$ACTION" -- "$unit" >>"$OUTPUT_FILE" 2>&1; then
     fail "systemd could not ${ACTION} ${unit}."
   fi
-  OBSERVED_STATE=$(systemctl --user is-active "$unit" 2>/dev/null || true)
+  OBSERVED_STATE=$(systemctl --user is-active -- "$unit" 2>/dev/null || true)
   HEALTH_STATUS=none
   if [ "$ACTION" = stop ]; then
     [ "$OBSERVED_STATE" != active ] || fail "The service is still active."

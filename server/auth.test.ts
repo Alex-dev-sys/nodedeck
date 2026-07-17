@@ -45,7 +45,17 @@ describe('backend authentication', () => {
     }
 
     expect(loadConfig({ ...base, COOKIE_SECURE: 'false' }).COOKIE_SECURE).toBe(false)
-    expect(loadConfig({ ...base, COOKIE_SECURE: 'true' }).COOKIE_SECURE).toBe(true)
+    expect(loadConfig({ ...base, CORS_ORIGIN: 'https://nodedeck.example', COOKIE_SECURE: 'true' }).COOKIE_SECURE).toBe(true)
     expect(loadConfig({ ...base, HOST_ALERT_THRESHOLD: '85' }).HOST_ALERT_THRESHOLD).toBe(85)
+  })
+
+  it('rejects insecure public cookies and non-loopback auth bypasses', () => {
+    const base = {
+      DATABASE_URL: 'postgresql://infra:infra@127.0.0.1:5433/infra_dashboard',
+      JWT_SECRET: 'test-secret-that-is-longer-than-thirty-two-characters',
+    }
+    expect(() => loadConfig({ ...base, CORS_ORIGIN: 'https://nodedeck.example', COOKIE_SECURE: 'false' })).toThrow('COOKIE_SECURE')
+    expect(() => loadConfig({ ...base, CORS_ORIGIN: 'https://nodedeck.example', COOKIE_SECURE: 'true', LOCAL_AUTH_BYPASS: 'true' })).toThrow('LOCAL_AUTH_BYPASS')
+    expect(loadConfig({ ...base, CORS_ORIGIN: 'https://nodedeck.example', COOKIE_SECURE: 'true' }).COOKIE_SECURE).toBe(true)
   })
 })

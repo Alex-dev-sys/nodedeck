@@ -19,11 +19,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm audit --audit-level=high
       - run: npm run typecheck
       - run: npm test
       - run: npm run lint
       - run: npm run build
-      - run: sh -n scripts/agent-heartbeat.sh scripts/agent-inventory.sh scripts/agent-logs.sh scripts/agent-commands.sh scripts/agent-run.sh scripts/agent-daemon.sh scripts/install-agent.sh scripts/smoke-test.sh scripts/agent-e2e-test.sh scripts/release-verify.sh
+      - run: sh -n scripts/agent-http.sh scripts/agent-heartbeat.sh scripts/agent-inventory.sh scripts/agent-logs.sh scripts/agent-commands.sh scripts/agent-command-exec.sh scripts/agent-run.sh scripts/agent-daemon.sh scripts/install-agent.sh scripts/smoke-test.sh scripts/agent-e2e-test.sh scripts/release-verify.sh public/install-agent.sh
 
   integration:
     needs: verify
