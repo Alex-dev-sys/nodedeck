@@ -40,6 +40,12 @@ Update an already enrolled agent without creating a new token:
 ./scripts/update-agent.sh
 ```
 
+For a cloud installation, update the agent from any directory with one command:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL 'https://nodedeck-zeta.vercel.app/update-agent.sh' | sh
+```
+
 It sends a heartbeat every 20 seconds and a deduplicated inventory every 60 seconds. Docker is
 optional. When Docker is available, the agent also sends a bounded, redacted log batch every
 60 seconds. The browser never sends a shell command directly to the host.
