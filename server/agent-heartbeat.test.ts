@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,7 +22,12 @@ function executable(directory: string, name: string, body: string) {
 function payloadHelper(directory: string) {
   return executable(directory, 'agent-http', `
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = --data ]; then shift; printf '%s\\n' "$1"; exit 0; fi
+  if [ "$1" = --data ]; then
+    shift
+    printf '%s\\n' "$1" > "$SERVER_OS_TEST_PAYLOAD_FILE"
+    printf '%s\\n' '{"capabilities":{"trackHostMetrics":true,"trackDocker":true,"trackNative":true,"collectLogs":true,"remoteControl":true}}'
+    exit 0
+  fi
   shift
 done
 exit 1`)
@@ -36,6 +41,7 @@ describe('agent host CPU metrics', () => {
     writeFileSync(procStat, 'cpu  100 0 100 700 0 0 0 0 0 0\n')
     executable(directory, 'sleep', `printf '%s\\n' 'cpu  110 0 110 780 0 0 0 0 0 0' > '${procStat}'`)
     const helper = payloadHelper(directory)
+    const payloadFile = join(directory, 'payload.json')
 
     const result = spawnSync(heartbeatScript, [], {
       encoding: 'utf8',
@@ -44,6 +50,8 @@ describe('agent host CPU metrics', () => {
         PATH: `${directory}:${process.env.PATH ?? ''}`,
         SERVER_OS_AGENT_TOKEN: 'test-token',
         SERVER_OS_AGENT_HTTP_HELPER: helper,
+        SERVER_OS_TEST_PAYLOAD_FILE: payloadFile,
+        SERVER_OS_AGENT_CAPABILITIES_FILE: join(directory, 'capabilities.env'),
         SERVER_OS_PROC_STAT_PATH: procStat,
         SERVER_OS_CPU_SAMPLE_SECONDS: '0',
         SERVER_OS_HEARTBEAT_ONCE: 'true',
@@ -51,8 +59,9 @@ describe('agent host CPU metrics', () => {
     })
 
     expect(result.status, result.stderr).toBe(0)
-    const payload = JSON.parse(result.stdout.trim().split('\n').at(-1)!) as { host: { cpu: number } }
+    const payload = JSON.parse(readFileSync(payloadFile, 'utf8')) as { host: { cpu: number }; agentVersion: string }
     expect(payload.host.cpu).toBe(20)
+    expect(payload.agentVersion).toBe('2026.07.18.1')
   })
 
   it('normalizes the process fallback by the number of CPU cores', () => {
@@ -62,6 +71,7 @@ describe('agent host CPU metrics', () => {
     executable(directory, 'ps', `printf '%s\\n' 100 60`)
     executable(directory, 'getconf', `printf '%s\\n' 4`)
     const helper = payloadHelper(directory)
+    const payloadFile = join(directory, 'payload.json')
 
     const result = spawnSync(heartbeatScript, [], {
       encoding: 'utf8',
@@ -70,13 +80,39 @@ describe('agent host CPU metrics', () => {
         PATH: `${directory}:${process.env.PATH ?? ''}`,
         SERVER_OS_AGENT_TOKEN: 'test-token',
         SERVER_OS_AGENT_HTTP_HELPER: helper,
+        SERVER_OS_TEST_PAYLOAD_FILE: payloadFile,
+        SERVER_OS_AGENT_CAPABILITIES_FILE: join(directory, 'capabilities.env'),
         SERVER_OS_PROC_STAT_PATH: join(directory, 'missing-stat'),
         SERVER_OS_HEARTBEAT_ONCE: 'true',
       },
     })
 
     expect(result.status, result.stderr).toBe(0)
-    const payload = JSON.parse(result.stdout.trim().split('\n').at(-1)!) as { host: { cpu: number } }
+    const payload = JSON.parse(readFileSync(payloadFile, 'utf8')) as { host: { cpu: number } }
     expect(payload.host.cpu).toBe(40)
+  })
+
+  it('stops collecting host metrics when the control plane disables them', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'nodedeck-heartbeat-disabled-'))
+    temporaryDirectories.push(directory)
+    const capabilitiesFile = join(directory, 'capabilities.env')
+    writeFileSync(capabilitiesFile, 'SERVER_OS_TRACK_HOST_METRICS=false\n')
+    const helper = payloadHelper(directory)
+    const payloadFile = join(directory, 'payload.json')
+
+    const result = spawnSync(heartbeatScript, [], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        SERVER_OS_AGENT_TOKEN: 'test-token',
+        SERVER_OS_AGENT_HTTP_HELPER: helper,
+        SERVER_OS_TEST_PAYLOAD_FILE: payloadFile,
+        SERVER_OS_AGENT_CAPABILITIES_FILE: capabilitiesFile,
+        SERVER_OS_HEARTBEAT_ONCE: 'true',
+      },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(readFileSync(payloadFile, 'utf8'))).toEqual({ agentVersion: '2026.07.18.1' })
   })
 })

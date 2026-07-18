@@ -5,11 +5,18 @@ CONTROL_URL=${SERVER_OS_CONTROL_URL:-http://127.0.0.1:8081}
 POLL_SECONDS=${SERVER_OS_COMMAND_POLL_INTERVAL:-5}
 MAX_BACKOFF_SECONDS=${SERVER_OS_COMMAND_MAX_BACKOFF:-30}
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$ROOT_DIR/agent-capabilities.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
 backoff=1
 while :; do
+  load_agent_capabilities
+  if ! capability_enabled "$SERVER_OS_REMOTE_CONTROL"; then
+    if [ "${SERVER_OS_COMMAND_ONCE:-false}" = true ]; then exit 0; fi
+    sleep "$POLL_SECONDS"
+    continue
+  fi
   response=$("$ROOT_DIR/agent-http.sh" --silent --show-error --write-out '\n%{http_code}' --request POST "${CONTROL_URL}/agent/v1/commands/next") || response='\n000'
   body=$(printf '%s' "$response" | sed '$d')
   status=$(printf '%s' "$response" | tail -n 1)

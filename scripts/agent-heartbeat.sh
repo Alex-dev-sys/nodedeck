@@ -7,6 +7,8 @@ CONTROL_URL=${SERVER_OS_CONTROL_URL:-http://127.0.0.1:8081}
 INTERVAL_SECONDS=${SERVER_OS_HEARTBEAT_INTERVAL:-20}
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 HTTP_HELPER=${SERVER_OS_AGENT_HTTP_HELPER:-"$ROOT_DIR/agent-http.sh"}
+AGENT_VERSION=2026.07.18.1
+. "$ROOT_DIR/agent-capabilities.sh"
 PROC_STAT_PATH=${SERVER_OS_PROC_STAT_PATH:-/proc/stat}
 CPU_SAMPLE_SECONDS=${SERVER_OS_CPU_SAMPLE_SECONDS:-1}
 HEARTBEAT_ONCE=${SERVER_OS_HEARTBEAT_ONCE:-false}
@@ -91,21 +93,29 @@ host_uptime_seconds() {
 }
 
 while :; do
-  host_cpu_percent
-  RAM=$(host_ram_percent)
-  DISK=$(df -P / 2>/dev/null | awk 'NR == 2 { gsub(/%/, "", $5); print $5 }' || echo 0)
-  UPTIME=$(host_uptime_seconds)
-  [ -n "$CPU" ] || CPU=0
-  [ -n "$RAM" ] || RAM=0
-  [ -n "$DISK" ] || DISK=0
-  [ -n "$UPTIME" ] || UPTIME=0
-  [ "$CPU" -le 100 ] 2>/dev/null || CPU=100
-  [ "$RAM" -le 100 ] 2>/dev/null || RAM=100
-  if ! "$HTTP_HELPER" --fail --silent --show-error \
+  load_agent_capabilities
+  if capability_enabled "$SERVER_OS_TRACK_HOST_METRICS"; then
+    host_cpu_percent
+    RAM=$(host_ram_percent)
+    DISK=$(df -P / 2>/dev/null | awk 'NR == 2 { gsub(/%/, "", $5); print $5 }' || echo 0)
+    UPTIME=$(host_uptime_seconds)
+    [ -n "$CPU" ] || CPU=0
+    [ -n "$RAM" ] || RAM=0
+    [ -n "$DISK" ] || DISK=0
+    [ -n "$UPTIME" ] || UPTIME=0
+    [ "$CPU" -le 100 ] 2>/dev/null || CPU=100
+    [ "$RAM" -le 100 ] 2>/dev/null || RAM=100
+    payload="{\"agentVersion\":\"${AGENT_VERSION}\",\"host\":{\"cpu\":${CPU},\"ram\":${RAM},\"disk\":${DISK},\"uptimeSec\":${UPTIME}}}"
+  else
+    payload="{\"agentVersion\":\"${AGENT_VERSION}\"}"
+  fi
+  if response=$("$HTTP_HELPER" --fail --silent --show-error \
     --request POST "${CONTROL_URL}/agent/v1/heartbeat" \
     --header 'Content-Type: application/json' \
-    --data "{\"host\":{\"cpu\":${CPU},\"ram\":${RAM},\"disk\":${DISK},\"uptimeSec\":${UPTIME}}}"
+    --data "$payload")
   then
+    save_agent_capabilities "$response"
+  else
     echo "Server-OS heartbeat failed; retrying on the next interval" >&2
   fi
   [ "$HEARTBEAT_ONCE" = true ] && break

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, Plus, Server, Trash2, Wifi, X } from 'lucide-react'
+import { Check, Copy, Plus, Server, Settings2, ShieldCheck, Trash2, Wifi, X } from 'lucide-react'
 import { useState } from 'react'
 import { buildAgentInstallCommand } from '@/services/agentInstall'
 import { useAuth } from '@/stores/auth'
@@ -14,7 +14,16 @@ interface Agent {
   hostRam: number | null
   hostDisk: number | null
   hostUptimeSec: number | null
+  agentVersion: string | null
+  trackHostMetrics: boolean
+  trackDocker: boolean
+  trackNative: boolean
+  collectLogs: boolean
+  remoteControl: boolean
+  settingsUpdatedAt: string
 }
+
+type AgentCapabilities = Pick<Agent, 'trackHostMetrics' | 'trackDocker' | 'trackNative' | 'collectLogs' | 'remoteControl'>
 
 interface Enrollment {
   id: string
@@ -31,12 +40,13 @@ export function AgentsPage() {
   const [copied, setCopied] = useState(false)
   const [showEnrollment, setShowEnrollment] = useState(false)
   const [agentToRevoke, setAgentToRevoke] = useState<Agent | null>(null)
+  const [agentToConfigure, setAgentToConfigure] = useState<Agent | null>(null)
   const query = useQuery({
     queryKey: ['agents'],
     queryFn: async () => {
       const response = await fetch('/api/v1/agents', { headers: { Authorization: `Bearer ${token}` } })
       if (!response.ok) throw new Error('Could not load agents.')
-      return response.json() as Promise<{ agents: Agent[]; serverTimeMs: number }>
+      return response.json() as Promise<{ agents: Agent[]; latestAgentVersion: string; serverTimeMs: number }>
     },
     refetchInterval: 10_000,
   })
@@ -60,11 +70,27 @@ export function AgentsPage() {
     },
     onSuccess: (data) => { setEnrollment(data.enrollment); setCopied(false) },
   })
+  const saveSettings = useMutation({
+    mutationFn: async ({ agentId, settings }: { agentId: string; settings: AgentCapabilities }) => {
+      const response = await fetch(`/api/v1/agents/${encodeURIComponent(agentId)}/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      })
+      if (!response.ok) throw new Error('Could not save agent settings.')
+      return response.json() as Promise<{ settings: AgentCapabilities }>
+    },
+    onSuccess: (_data, variables) => {
+      setAgentToConfigure((current) => current?.id === variables.agentId ? { ...current, ...variables.settings } : current)
+      void queryClient.invalidateQueries({ queryKey: ['agents'] })
+      void queryClient.invalidateQueries({ queryKey: ['services'] })
+    },
+  })
 
   if (query.isLoading) return <p className="text-fg-muted">Loading agents…</p>
   if (query.isError) return <p className="text-danger">{query.error.message}</p>
   if (!query.data) return null
-  const { agents, serverTimeMs: now } = query.data
+  const { agents, latestAgentVersion, serverTimeMs: now } = query.data
   const canRevoke = role === 'owner' || role === 'admin'
 
   const controlUrl = typeof window === 'undefined' ? '' : window.location.origin
@@ -77,26 +103,85 @@ export function AgentsPage() {
     <div className="mt-6 grid gap-4 md:grid-cols-2">
       {agents.map((agent) => {
         const online = agent.lastSeenAt && now - Date.parse(agent.lastSeenAt) < 60_000
-        return <article key={agent.id} className="rounded-2xl border border-border bg-surface p-5">
+        const enabledCapabilities = [agent.trackHostMetrics, agent.trackDocker, agent.trackNative, agent.collectLogs, agent.remoteControl].filter(Boolean).length
+        const updateAvailable = agent.agentVersion !== latestAgentVersion
+        return <article
+          key={agent.id}
+          role="button"
+          tabIndex={0}
+          onClick={() => { saveSettings.reset(); setAgentToConfigure(agent) }}
+          onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); saveSettings.reset(); setAgentToConfigure(agent) } }}
+          className="cursor-pointer rounded-2xl border border-border bg-surface p-5 transition hover:border-accent/50 hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/40"
+        >
           <div className="flex items-center gap-3">
             <span className="grid h-10 w-10 place-items-center rounded-xl bg-accent/15 text-accent"><Server className="h-5 w-5" /></span>
             <div className="min-w-0 flex-1"><h2 className="truncate font-semibold text-fg">{agent.name}</h2><p className="truncate text-sm text-fg-muted">{agent.hostname}</p></div>
+            <span className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-1 text-[11px] text-fg-muted"><Settings2 className="h-3 w-3" />{enabledCapabilities}/5</span>
             {canRevoke && <button
               disabled={revoke.isPending}
-              onClick={() => { revoke.reset(); setAgentToRevoke(agent) }}
+              onClick={(event) => { event.stopPropagation(); revoke.reset(); setAgentToRevoke(agent) }}
               title="Revoke agent access"
               className="rounded-lg border border-danger/30 p-2 text-danger hover:bg-danger/10 disabled:opacity-50"
             ><Trash2 className="h-4 w-4" /></button>}
           </div>
           <div className="mt-5 flex items-center gap-2 text-sm"><Wifi className="h-4 w-4" style={{ color: online ? '#6ee7b7' : '#ff4d4f' }} /><span className={online ? 'text-accent' : 'text-danger'}>{online ? 'Online' : 'Offline'}</span><span className="text-fg-faint">· {agent.lastSeenAt ? new Date(agent.lastSeenAt).toLocaleTimeString() : 'Never seen'}</span></div>
-          <div className="mt-4 grid grid-cols-3 gap-2 border-t border-border pt-4 text-xs text-fg-muted"><span>CPU <b className="text-fg">{agent.hostCpu ?? 0}%</b></span><span>RAM <b className="text-fg">{agent.hostRam ?? 0}%</b></span><span>Disk <b className="text-fg">{agent.hostDisk ?? 0}%</b></span></div>
+          <div className="mt-4 grid grid-cols-3 gap-2 border-t border-border pt-4 text-xs text-fg-muted"><span>CPU <b className="text-fg">{agent.trackHostMetrics ? `${agent.hostCpu ?? 0}%` : 'Off'}</b></span><span>RAM <b className="text-fg">{agent.trackHostMetrics ? `${agent.hostRam ?? 0}%` : 'Off'}</b></span><span>Disk <b className="text-fg">{agent.trackHostMetrics ? `${agent.hostDisk ?? 0}%` : 'Off'}</b></span></div>
+          {updateAvailable && <p className="mt-3 text-xs text-warning">Agent update available</p>}
         </article>
       })}
     </div>
     {canRevoke && showEnrollment && !enrollment && <EnrollmentDialog name={enrollmentName} setName={setEnrollmentName} submit={() => enroll.mutate(enrollmentName)} pending={enroll.isPending} error={enroll.error?.message} close={() => setShowEnrollment(false)} />}
     {canRevoke && enrollment && <EnrollmentResult enrollment={enrollment} command={command} copied={copied} copy={async () => { await navigator.clipboard.writeText(command); setCopied(true) }} close={() => { setEnrollment(null); setShowEnrollment(false) }} />}
     {canRevoke && agentToRevoke && <RevokeAgentDialog agent={agentToRevoke} pending={revoke.isPending} error={revoke.error?.message} confirm={() => revoke.mutate(agentToRevoke.id)} close={() => { if (!revoke.isPending) setAgentToRevoke(null) }} />}
+    {agentToConfigure && <AgentSettingsDialog
+      agent={agentToConfigure}
+      latestVersion={latestAgentVersion}
+      canEdit={canRevoke}
+      pending={saveSettings.isPending}
+      error={saveSettings.error?.message}
+      save={(settings) => saveSettings.mutate({ agentId: agentToConfigure.id, settings })}
+      close={() => { if (!saveSettings.isPending) setAgentToConfigure(null) }}
+    />}
   </div>
+}
+
+const capabilityOptions: Array<{ key: keyof AgentCapabilities; title: string; description: string; group: 'Monitoring' | 'Control' }> = [
+  { key: 'trackHostMetrics', title: 'Server metrics', description: 'CPU, RAM, disk and uptime.', group: 'Monitoring' },
+  { key: 'trackDocker', title: 'Docker projects', description: 'Containers and Docker Compose projects.', group: 'Monitoring' },
+  { key: 'trackNative', title: 'Native applications', description: 'systemd, PM2 and macOS LaunchAgents.', group: 'Monitoring' },
+  { key: 'collectLogs', title: 'Container logs', description: 'Recent redacted Docker logs for diagnostics.', group: 'Monitoring' },
+  { key: 'remoteControl', title: 'Remote control', description: 'Allow start, stop, restart and auto-recovery.', group: 'Control' },
+]
+
+function AgentSettingsDialog({ agent, latestVersion, canEdit, pending, error, save, close }: { agent: Agent; latestVersion: string; canEdit: boolean; pending: boolean; error?: string; save: (settings: AgentCapabilities) => void; close: () => void }) {
+  const [settings, setSettings] = useState<AgentCapabilities>({
+    trackHostMetrics: agent.trackHostMetrics,
+    trackDocker: agent.trackDocker,
+    trackNative: agent.trackNative,
+    collectLogs: agent.collectLogs,
+    remoteControl: agent.remoteControl,
+  })
+  const [copiedUpdate, setCopiedUpdate] = useState(false)
+  const updateCommand = "curl --proto '=https' --tlsv1.2 -fsSL 'https://nodedeck-zeta.vercel.app/update-agent.sh' | sh"
+  const updateAvailable = agent.agentVersion !== latestVersion
+
+  const toggle = (key: keyof AgentCapabilities) => {
+    if (!canEdit) return
+    setSettings((current) => {
+      const next = { ...current, [key]: !current[key] }
+      if (key === 'trackDocker' && !next.trackDocker) next.collectLogs = false
+      if (key === 'collectLogs' && next.collectLogs) next.trackDocker = true
+      return next
+    })
+  }
+
+  return <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/60 p-4"><div role="dialog" aria-modal="true" aria-labelledby="agent-settings-title" className="my-4 w-full max-w-xl rounded-2xl border border-border bg-surface p-5 shadow-2xl">
+    <div className="flex items-start justify-between gap-3"><div><h2 id="agent-settings-title" className="text-lg font-semibold text-fg">{agent.name} capabilities</h2><p className="mt-1 text-sm text-fg-muted">Choose what this agent may observe and control.</p></div><button type="button" onClick={close} disabled={pending} aria-label="Close" className="text-fg-faint hover:text-fg disabled:opacity-50"><X className="h-5 w-5" /></button></div>
+    {(['Monitoring', 'Control'] as const).map((group) => <section key={group} className="mt-5"><h3 className="text-xs font-semibold uppercase tracking-wider text-fg-faint">{group}</h3><div className="mt-2 divide-y divide-border rounded-xl border border-border bg-surface-2">{capabilityOptions.filter((option) => option.group === group).map((option) => <div key={option.key} className="flex items-center gap-4 p-3.5"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-fg">{option.title}</p><p className="mt-0.5 text-xs text-fg-muted">{option.description}</p></div><button type="button" role="switch" aria-checked={settings[option.key]} disabled={!canEdit || pending} onClick={() => toggle(option.key)} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settings[option.key] ? 'bg-accent' : 'bg-border'} disabled:opacity-50`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settings[option.key] ? 'left-[22px]' : 'left-0.5'}`} /></button></div>)}</div></section>)}
+    <div className="mt-5 rounded-xl border border-border bg-surface-2 p-3.5"><div className="flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-accent" /><p className="text-sm font-medium text-fg">Agent version</p></div><p className="mt-1 text-xs text-fg-muted">Installed: {agent.agentVersion ?? 'unknown'} · Latest: {latestVersion}</p>{updateAvailable && <><pre className="mt-3 overflow-x-auto whitespace-pre rounded-lg border border-border bg-[#0b0c10] p-2.5 text-[11px] text-fg-muted"><code>{updateCommand}</code></pre><button type="button" onClick={async () => { await navigator.clipboard.writeText(updateCommand); setCopiedUpdate(true) }} className="mt-2 inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-2.5 text-xs text-fg">{copiedUpdate ? <Check className="h-3.5 w-3.5 text-accent" /> : <Copy className="h-3.5 w-3.5" />}{copiedUpdate ? 'Copied' : 'Copy update command'}</button></>}</div>
+    {error && <p className="mt-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</p>}
+    <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={close} disabled={pending} className="h-9 rounded-lg border border-border bg-surface-2 px-3 text-sm text-fg disabled:opacity-50">{canEdit ? 'Cancel' : 'Close'}</button>{canEdit && <button type="button" onClick={() => save(settings)} disabled={pending} className="h-9 rounded-lg bg-accent px-4 text-sm font-semibold text-[#04150e] disabled:opacity-50">{pending ? 'Saving…' : 'Save capabilities'}</button>}</div>
+  </div></div>
 }
 
 function RevokeAgentDialog({ agent, pending, error, confirm, close }: { agent: Agent; pending: boolean; error?: string; confirm: () => void; close: () => void }) {

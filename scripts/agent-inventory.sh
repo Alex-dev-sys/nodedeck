@@ -5,11 +5,13 @@ set -eu
 CONTROL_URL=${SERVER_OS_CONTROL_URL:-http://127.0.0.1:8081}
 PROTECTED_PROJECTS=${SERVER_OS_PROTECTED_PROJECTS:-server-os,server-os-stage2,infra-dashboard-release-smoke,infra-dashboard,nodedeck}
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$ROOT_DIR/agent-capabilities.sh"
+load_agent_capabilities
 
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
 docker_services='[]'
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+if capability_enabled "$SERVER_OS_TRACK_DOCKER" && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   stats=$(docker stats --no-stream --no-trunc --format '{{json .}}' | jq -s 'map({key: .ID, cpu: ((.CPUPerc // "0%" | rtrimstr("%") | tonumber) // 0), ram: ((.MemPerc // "0%" | rtrimstr("%") | tonumber) // 0)})')
   container_ids=$(docker ps -aq --no-trunc)
   if [ -n "$container_ids" ]; then
@@ -87,7 +89,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 fi
 
 systemd_services=$(
-  if command -v systemctl >/dev/null 2>&1; then
+  if capability_enabled "$SERVER_OS_TRACK_NATIVE" && command -v systemctl >/dev/null 2>&1; then
     for scope in user system; do
       if [ "$scope" = user ]; then
         unit_dir="$HOME/.config/systemd/user"
@@ -133,7 +135,7 @@ systemd_services=$(
 systemd_services=$(printf '%s\n' "$systemd_services" | jq -s 'unique_by(.id)')
 
 collect_launchd_services() {
-  if [ "$(uname -s)" = Darwin ] && command -v launchctl >/dev/null 2>&1 && command -v plutil >/dev/null 2>&1; then
+  if capability_enabled "$SERVER_OS_TRACK_NATIVE" && [ "$(uname -s)" = Darwin ] && command -v launchctl >/dev/null 2>&1 && command -v plutil >/dev/null 2>&1; then
     launchd_dir="$HOME/Library/LaunchAgents"
     if [ -d "$launchd_dir" ]; then
       for plist in "$launchd_dir"/*.plist; do
@@ -180,7 +182,7 @@ launchd_services=$(collect_launchd_services) || true
 launchd_services=$(printf '%s\n' "$launchd_services" | jq -s 'unique_by(.id)')
 
 pm2_services='[]'
-if command -v pm2 >/dev/null 2>&1; then
+if capability_enabled "$SERVER_OS_TRACK_NATIVE" && command -v pm2 >/dev/null 2>&1; then
   pm2_services=$(pm2 jlist 2>/dev/null | jq '[.[] |
     (.pm2_env.status // "unknown") as $runtimeState |
     {

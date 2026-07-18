@@ -20,15 +20,13 @@ COMMAND_PID=
 LOGS_PID=
 "$ROOT_DIR/agent-commands.sh" &
 COMMAND_PID=$!
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  (
-    while :; do
-      "$ROOT_DIR/agent-logs.sh" || echo "NodeDeck log collection failed; retrying on the next interval" >&2
-      sleep "$LOGS_INTERVAL"
-    done
-  ) &
-  LOGS_PID=$!
-fi
+(
+  while :; do
+    "$ROOT_DIR/agent-logs.sh" || echo "NodeDeck log collection failed; retrying on the next interval" >&2
+    sleep "$LOGS_INTERVAL"
+  done
+) &
+LOGS_PID=$!
 
 cleanup() {
   kill "$HEARTBEAT_PID" 2>/dev/null || true

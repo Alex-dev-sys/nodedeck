@@ -105,6 +105,31 @@ printf '%s\\n' '[{"pm_id":7,"name":"worker","pm2_env":{"status":"online","pm_exe
     ]))
   })
 
+  it('does not inspect disabled Docker or native runtimes', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'nodedeck-disabled-inventory-'))
+    temporaryDirectories.push(directory)
+    const capabilitiesFile = join(directory, 'capabilities.env')
+    writeFileSync(capabilitiesFile, 'SERVER_OS_TRACK_DOCKER=false\nSERVER_OS_TRACK_NATIVE=false\n')
+    const docker = join(directory, 'docker')
+    writeFileSync(docker, '#!/bin/sh\nexit 99\n')
+    chmodSync(docker, 0o755)
+
+    const result = spawnSync(inventoryScript, [], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: directory,
+        PATH: `${directory}:${process.env.PATH ?? ''}`,
+        SERVER_OS_AGENT_TOKEN: 'test-token',
+        SERVER_OS_AGENT_CAPABILITIES_FILE: capabilitiesFile,
+        SERVER_OS_INVENTORY_DRY_RUN: 'true',
+      },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({ services: [] })
+  })
+
   it('discovers running macOS LaunchAgents without updater or runtime duplicates', () => {
     const directory = mkdtempSync(join(tmpdir(), 'nodedeck-launchd-inventory-'))
     temporaryDirectories.push(directory)

@@ -26,7 +26,15 @@ const servicePolicySchema = z.object({
 }).strict().refine((value) => !value.autoRecovery || value.controlEnabled, { message: 'Auto recovery requires remote control to be enabled.', path: ['autoRecovery'] })
 const enrollmentSchema = z.object({ name: z.string().trim().min(1).max(80) }).strict()
 const agentEnrollmentSchema = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/), hostname: z.string().trim().min(1).max(255) }).strict()
+const agentCapabilitiesSchema = z.object({
+  trackHostMetrics: z.boolean(),
+  trackDocker: z.boolean(),
+  trackNative: z.boolean(),
+  collectLogs: z.boolean(),
+  remoteControl: z.boolean(),
+}).strict()
 const heartbeatSchema = z.object({
+  agentVersion: z.string().trim().min(1).max(64).optional(),
   host: z.object({
     cpu: z.coerce.number().min(0).max(100),
     ram: z.coerce.number().min(0).max(100),
@@ -78,6 +86,7 @@ const notificationChannelSchema = z.discriminatedUnion('kind', [
 ])
 const uuidSchema = z.string().uuid()
 const serviceIdSchema = z.string().min(1).max(128)
+const AGENT_RELEASE_VERSION = '2026.07.18.1'
 
 function tokenHash(token: string) {
   return createHash('sha256').update(token).digest('hex')
@@ -174,6 +183,7 @@ async function snapshot(pool: Pool, organizationId: string) {
        FROM services s JOIN agents a ON a.id = s.agent_id
        LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
        WHERE s.organization_id = $1 AND a.revoked_at IS NULL AND s.runtime_state IS DISTINCT FROM 'missing'
+         AND ((s.kind = 'docker' AND a.track_docker = true) OR (s.kind <> 'docker' AND a.track_native = true))
        ORDER BY s.name`,
       [organizationId],
     ),
@@ -185,7 +195,7 @@ async function snapshot(pool: Pool, organizationId: string) {
     ),
     pool.query<{ cpu: number | null; ram: number | null; disk: number | null; uptimeSec: number | null }>(
       `SELECT host_cpu AS cpu, host_ram AS ram, host_disk AS disk, host_uptime_sec AS "uptimeSec"
-       FROM agents WHERE organization_id = $1 AND revoked_at IS NULL
+       FROM agents WHERE organization_id = $1 AND revoked_at IS NULL AND track_host_metrics = true
        ORDER BY last_seen_at DESC NULLS LAST LIMIT 1`,
       [organizationId],
     ),
@@ -386,11 +396,60 @@ export function createApp(config: Config, pool: Pool) {
   app.get('/api/v1/agents', requireAuth(config), async (req: AuthenticatedRequest, res) => {
     const agents = await pool.query(
       `SELECT id, name, hostname, last_seen_at AS "lastSeenAt", created_at AS "createdAt",
-              host_cpu AS "hostCpu", host_ram AS "hostRam", host_disk AS "hostDisk", host_uptime_sec AS "hostUptimeSec"
+              host_cpu AS "hostCpu", host_ram AS "hostRam", host_disk AS "hostDisk", host_uptime_sec AS "hostUptimeSec",
+              agent_version AS "agentVersion", track_host_metrics AS "trackHostMetrics",
+              track_docker AS "trackDocker", track_native AS "trackNative", collect_logs AS "collectLogs",
+              remote_control AS "remoteControl", settings_updated_at AS "settingsUpdatedAt"
        FROM agents WHERE organization_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC`,
       [req.user!.organizationId],
     )
-    res.json({ agents: agents.rows, serverTimeMs: Date.now() })
+    res.json({ agents: agents.rows, latestAgentVersion: AGENT_RELEASE_VERSION, serverTimeMs: Date.now() })
+  })
+
+  app.put('/api/v1/agents/:agentId/settings', requireAuth(config), requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res) => {
+    const input = agentCapabilitiesSchema.parse(req.body)
+    const agentId = uuidSchema.parse(req.params.agentId)
+    const user = req.user!
+    const saved = await inTransaction(pool, async (client) => {
+      const result = await client.query(
+        `UPDATE agents SET
+           track_host_metrics = $3, track_docker = $4, track_native = $5, collect_logs = $6,
+           remote_control = $7, settings_updated_at = now(),
+           host_cpu = CASE WHEN $3 THEN host_cpu ELSE NULL END,
+           host_ram = CASE WHEN $3 THEN host_ram ELSE NULL END,
+           host_disk = CASE WHEN $3 THEN host_disk ELSE NULL END,
+           host_uptime_sec = CASE WHEN $3 THEN host_uptime_sec ELSE NULL END
+         WHERE id = $1 AND organization_id = $2 AND revoked_at IS NULL
+         RETURNING track_host_metrics AS "trackHostMetrics", track_docker AS "trackDocker",
+           track_native AS "trackNative", collect_logs AS "collectLogs", remote_control AS "remoteControl",
+           settings_updated_at AS "settingsUpdatedAt"`,
+        [agentId, user.organizationId, input.trackHostMetrics, input.trackDocker, input.trackNative, input.collectLogs, input.remoteControl],
+      )
+      if (!result.rowCount) return null
+      if (!input.trackHostMetrics) {
+        await client.query(`UPDATE alert_events SET status = 'resolved', resolved_at = now()
+          WHERE agent_id = $1 AND kind = 'host_resource_high' AND status = 'open'`, [agentId])
+      }
+      await client.query(
+        `UPDATE alert_events a SET status = 'resolved', resolved_at = now()
+         FROM services s WHERE a.service_id = s.id AND a.agent_id = $1 AND a.status = 'open'
+           AND ((s.kind = 'docker' AND $2 = false) OR (s.kind <> 'docker' AND $3 = false))`,
+        [agentId, input.trackDocker, input.trackNative],
+      )
+      if (!input.remoteControl) {
+        await client.query(`UPDATE commands SET status = 'cancelled', completed_at = now(), result = $2::jsonb
+          WHERE agent_id = $1 AND status = 'queued'`, [agentId, JSON.stringify({ message: 'Remote control was disabled for this agent.' })])
+      }
+      await client.query(
+        `INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
+         VALUES ($1, $2, 'agent.settings.update', $3, 'ok', $4::jsonb)`,
+        [user.organizationId, user.id, agentId, JSON.stringify(input)],
+      )
+      return result.rows[0]
+    })
+    if (!saved) return res.status(404).json({ error: 'agent_not_found' })
+    publishSnapshotChanged(user.organizationId)
+    res.json({ settings: saved })
   })
 
   app.get('/api/v1/notification-channels', requireAuth(config), async (req: AuthenticatedRequest, res) => {
@@ -518,55 +577,83 @@ export function createApp(config: Config, pool: Pool) {
   app.post('/agent/v1/heartbeat', rateLimit(pool, {
     scope: 'agent.heartbeat', limit: 12, windowSeconds: 60, key: agentCredentialKey,
   }), async (req, res) => {
-    const { host } = heartbeatSchema.parse(req.body)
+    const { host, agentVersion } = heartbeatSchema.parse(req.body)
     const agentToken = readAgentToken(req)
     if (!agentToken) return res.status(401).json({ error: 'agent_authentication_required' })
-    const result = await pool.query<{ id: string; organizationId: string }>(
+    const result = await pool.query<{
+      id: string
+      organizationId: string
+      trackHostMetrics: boolean
+      trackDocker: boolean
+      trackNative: boolean
+      collectLogs: boolean
+      remoteControl: boolean
+    }>(
       `UPDATE agents
-       SET last_seen_at = now(), host_cpu = $1, host_ram = $2, host_disk = $3, host_uptime_sec = $4
-       WHERE token_hash = $5 AND revoked_at IS NULL RETURNING id, organization_id AS "organizationId"`,
-      [host?.cpu ?? null, host?.ram ?? null, host?.disk ?? null, host?.uptimeSec ?? null, tokenHash(agentToken)],
+       SET last_seen_at = now(), agent_version = COALESCE($5, agent_version),
+           host_cpu = CASE WHEN track_host_metrics THEN COALESCE($1, host_cpu) ELSE NULL END,
+           host_ram = CASE WHEN track_host_metrics THEN COALESCE($2, host_ram) ELSE NULL END,
+           host_disk = CASE WHEN track_host_metrics THEN COALESCE($3, host_disk) ELSE NULL END,
+           host_uptime_sec = CASE WHEN track_host_metrics THEN COALESCE($4, host_uptime_sec) ELSE NULL END
+       WHERE token_hash = $6 AND revoked_at IS NULL
+       RETURNING id, organization_id AS "organizationId", track_host_metrics AS "trackHostMetrics",
+         track_docker AS "trackDocker", track_native AS "trackNative", collect_logs AS "collectLogs",
+         remote_control AS "remoteControl"`,
+      [host?.cpu ?? null, host?.ram ?? null, host?.disk ?? null, host?.uptimeSec ?? null, agentVersion ?? null, tokenHash(agentToken)],
     )
     if (!result.rowCount) return res.status(401).json({ error: 'invalid_agent_token' })
-    if (host) {
+    const current = result.rows[0]
+    if (host && current.trackHostMetrics) {
       await pool.query(
         `INSERT INTO host_metric_samples (organization_id, agent_id, cpu, ram, disk, uptime_sec)
          SELECT organization_id, id, $2, $3, $4, $5 FROM agents WHERE id = $1`,
-        [result.rows[0].id, host.cpu, host.ram, host.disk, host.uptimeSec],
+        [current.id, host.cpu, host.ram, host.disk, host.uptimeSec],
       )
-      await pool.query(`DELETE FROM host_metric_samples WHERE agent_id = $1 AND recorded_at < now() - interval '30 days'`, [result.rows[0].id])
+      await pool.query(`DELETE FROM host_metric_samples WHERE agent_id = $1 AND recorded_at < now() - interval '30 days'`, [current.id])
     }
     await pool.query(`UPDATE alert_events SET status = 'resolved', resolved_at = now()
-      WHERE agent_id = $1 AND kind = 'agent_offline' AND status = 'open'`, [result.rows[0].id])
-    const metrics = [host?.cpu, host?.ram, host?.disk].filter((value): value is number => value != null)
+      WHERE agent_id = $1 AND kind = 'agent_offline' AND status = 'open'`, [current.id])
+    const metrics = current.trackHostMetrics ? [host?.cpu, host?.ram, host?.disk].filter((value): value is number => value != null) : []
     if (metrics.some((value) => value >= config.HOST_ALERT_THRESHOLD)) {
       await pool.query(
         `INSERT INTO alert_events (organization_id, agent_id, kind, title, details)
          SELECT organization_id, id, 'host_resource_high', 'Host resource usage is high', $2::jsonb FROM agents WHERE id = $1
          ON CONFLICT (agent_id, kind) WHERE status = 'open' AND agent_id IS NOT NULL AND service_id IS NULL AND command_id IS NULL DO NOTHING`,
-        [result.rows[0].id, JSON.stringify({ cpu: host?.cpu, ram: host?.ram, disk: host?.disk, threshold: config.HOST_ALERT_THRESHOLD })],
+        [current.id, JSON.stringify({ cpu: host?.cpu, ram: host?.ram, disk: host?.disk, threshold: config.HOST_ALERT_THRESHOLD })],
       )
     } else {
       await pool.query(`UPDATE alert_events SET status = 'resolved', resolved_at = now()
-        WHERE agent_id = $1 AND kind = 'host_resource_high' AND status = 'open'`, [result.rows[0].id])
+        WHERE agent_id = $1 AND kind = 'host_resource_high' AND status = 'open'`, [current.id])
     }
-    publishSnapshotChanged(result.rows[0].organizationId)
+    publishSnapshotChanged(current.organizationId)
     await deliverPendingNotifications(pool, config)
-    res.status(204).end()
+    res.json({
+      capabilities: {
+        trackHostMetrics: current.trackHostMetrics,
+        trackDocker: current.trackDocker,
+        trackNative: current.trackNative,
+        collectLogs: current.collectLogs,
+        remoteControl: current.remoteControl,
+      },
+      latestAgentVersion: AGENT_RELEASE_VERSION,
+    })
   })
 
   app.post('/agent/v1/inventory', rateLimit(pool, {
     scope: 'agent.inventory', limit: 5, windowSeconds: 60, key: agentCredentialKey,
   }), async (req, res) => {
-    const { services } = inventorySchema.parse(req.body)
+    const { services: submittedServices } = inventorySchema.parse(req.body)
     const agentToken = readAgentToken(req)
     if (!agentToken) return res.status(401).json({ error: 'agent_authentication_required' })
-    const agent = await pool.query<{ id: string; organizationId: string; hostname: string }>(
-      `SELECT id, organization_id AS "organizationId", hostname FROM agents WHERE token_hash = $1 AND revoked_at IS NULL`,
+    const agent = await pool.query<{ id: string; organizationId: string; hostname: string; trackDocker: boolean; trackNative: boolean; remoteControl: boolean }>(
+      `SELECT id, organization_id AS "organizationId", hostname, track_docker AS "trackDocker",
+              track_native AS "trackNative", remote_control AS "remoteControl"
+       FROM agents WHERE token_hash = $1 AND revoked_at IS NULL`,
       [tokenHash(agentToken)],
     )
     const current = agent.rows[0]
     if (!current) return res.status(401).json({ error: 'invalid_agent_token' })
+    const services = submittedServices.filter((service) => service.kind === 'docker' ? current.trackDocker : current.trackNative)
     const openedAlerts = await inTransaction(pool, async (client) => {
       let opened = false
       for (const service of services) {
@@ -636,7 +723,7 @@ export function createApp(config: Config, pool: Pool) {
                   'auto_' || md5(s.id || ':' || floor(extract(epoch FROM now()) / p.recovery_delay_sec)::text) AS idempotency_key
            FROM services s
            JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
-           JOIN agents a ON a.id = s.agent_id AND a.revoked_at IS NULL AND a.last_seen_at >= now() - interval '60 seconds'
+           JOIN agents a ON a.id = s.agent_id AND a.revoked_at IS NULL AND a.last_seen_at >= now() - interval '60 seconds' AND a.remote_control = true
            WHERE s.agent_id = $1 AND s.container_id = ANY($2::text[])
              AND s.status = 'offline' AND s.runtime_state IS DISTINCT FROM 'missing'
              AND s.desired_state = 'running' AND p.auto_recovery = true AND p.control_enabled = true
@@ -661,16 +748,18 @@ export function createApp(config: Config, pool: Pool) {
       )
       await client.query(
         `UPDATE services SET status = 'offline', runtime_state = 'missing', cpu = 0, ram = 0, updated_at = now()
-         WHERE agent_id = $1 AND container_id IS NOT NULL AND NOT (container_id = ANY($2::text[]))`,
-        [current.id, resourceKeys],
+         WHERE agent_id = $1 AND container_id IS NOT NULL AND NOT (container_id = ANY($2::text[]))
+           AND ((kind = 'docker' AND $3 = true) OR (kind <> 'docker' AND $4 = true))`,
+        [current.id, resourceKeys, current.trackDocker, current.trackNative],
       )
       const disappearedAlerts = await client.query(
         `INSERT INTO alert_events (organization_id, agent_id, service_id, kind, title, details)
          SELECT organization_id, agent_id, id, 'service_offline', 'Service disappeared from inventory', jsonb_build_object('name', name, 'resourceKey', container_id, 'source', kind)
          FROM services WHERE agent_id = $1 AND runtime_state = 'missing'
+           AND ((kind = 'docker' AND $2 = true) OR (kind <> 'docker' AND $3 = true))
            AND (compose_project IS NULL OR container_id LIKE 'docker-compose:%')
          ON CONFLICT (service_id, kind) WHERE status = 'open' AND service_id IS NOT NULL DO NOTHING`,
-        [current.id],
+        [current.id, current.trackDocker, current.trackNative],
       )
       opened ||= Boolean(disappearedAlerts.rowCount)
       await client.query('UPDATE agents SET last_seen_at = now() WHERE id = $1', [current.id])
@@ -687,8 +776,12 @@ export function createApp(config: Config, pool: Pool) {
     const agentToken = readAgentToken(req)
     if (!agentToken) return res.status(401).json({ error: 'agent_authentication_required' })
     const command = await inTransaction(pool, async (client) => {
-      const agent = await client.query<{ id: string }>('SELECT id FROM agents WHERE token_hash = $1 AND revoked_at IS NULL FOR UPDATE', [tokenHash(agentToken)])
+      const agent = await client.query<{ id: string; remoteControl: boolean }>(
+        'SELECT id, remote_control AS "remoteControl" FROM agents WHERE token_hash = $1 AND revoked_at IS NULL FOR UPDATE',
+        [tokenHash(agentToken)],
+      )
       if (!agent.rowCount) return 'invalid' as const
+      if (!agent.rows[0].remoteControl) return null
       await client.query(`UPDATE commands SET status = 'expired', completed_at = now(), result = $2::jsonb
         WHERE agent_id = $1 AND status = 'queued' AND expires_at <= now()`, [agent.rows[0].id, JSON.stringify({ message: 'Command expired before the agent claimed it.' })])
       await client.query(`UPDATE commands SET status = 'expired', completed_at = now(), result = $2::jsonb
@@ -741,8 +834,13 @@ export function createApp(config: Config, pool: Pool) {
     const { entries } = logBatchSchema.parse(req.body)
     const agentToken = readAgentToken(req)
     if (!agentToken) return res.status(401).json({ error: 'agent_authentication_required' })
-    const agent = await pool.query<{ id: string; organizationId: string }>('SELECT id, organization_id AS "organizationId" FROM agents WHERE token_hash = $1 AND revoked_at IS NULL', [tokenHash(agentToken)])
+    const agent = await pool.query<{ id: string; organizationId: string; collectLogs: boolean; trackDocker: boolean }>(
+      `SELECT id, organization_id AS "organizationId", collect_logs AS "collectLogs", track_docker AS "trackDocker"
+       FROM agents WHERE token_hash = $1 AND revoked_at IS NULL`,
+      [tokenHash(agentToken)],
+    )
     if (!agent.rowCount) return res.status(401).json({ error: 'invalid_agent_token' })
+    if (!agent.rows[0].collectLogs || !agent.rows[0].trackDocker) return res.status(204).end()
     await inTransaction(pool, async (client) => {
       for (const entry of entries) {
         const service = await client.query<{ id: string }>('SELECT id FROM services WHERE agent_id = $1 AND container_id = $2', [agent.rows[0].id, entry.containerId])
@@ -925,7 +1023,7 @@ export function createApp(config: Config, pool: Pool) {
       const idempotencyKey = req.header('idempotency-key')
       if (idempotencyKey && !/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) return res.status(400).json({ error: 'invalid_idempotency_key' })
       const command = await inTransaction(pool, async (client) => {
-        const service = await client.query<{ id: string; agentId: string | null; agentOnline: boolean; protected: boolean; managed: boolean; controlEnabled: boolean }>(
+        const service = await client.query<{ id: string; agentId: string | null; agentOnline: boolean; protected: boolean; managed: boolean; controlEnabled: boolean; agentRemoteControl: boolean }>(
           `SELECT s.id, s.agent_id AS "agentId", s.is_protected AS protected,
                   (s.container_id IS NOT NULL AND (
                     s.kind = 'docker'
@@ -933,6 +1031,7 @@ export function createApp(config: Config, pool: Pool) {
                     OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
                   )) AS managed,
                   COALESCE(p.control_enabled, true) AS "controlEnabled",
+                  COALESCE(a.remote_control, false) AS "agentRemoteControl",
                   (a.revoked_at IS NULL AND a.last_seen_at >= now() - interval '60 seconds') AS "agentOnline"
            FROM services s LEFT JOIN agents a ON a.id = s.agent_id
            LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
@@ -943,6 +1042,7 @@ export function createApp(config: Config, pool: Pool) {
         if (!service.rows[0].agentId) return 'unmanaged' as const
         if (!service.rows[0].managed) return 'unmanaged' as const
         if (!service.rows[0].controlEnabled) return 'control_disabled' as const
+        if (!service.rows[0].agentRemoteControl) return 'agent_control_disabled' as const
         if (!service.rows[0].agentOnline) return 'agent_offline' as const
         if (service.rows[0].protected) return 'protected' as const
 
@@ -977,6 +1077,7 @@ export function createApp(config: Config, pool: Pool) {
       }
       if (command === 'unmanaged') return res.status(409).json({ error: 'service_not_managed' })
       if (command === 'control_disabled') return res.status(409).json({ error: 'service_control_disabled', message: 'Remote control is disabled in this service settings.' })
+      if (command === 'agent_control_disabled') return res.status(409).json({ error: 'agent_control_disabled', message: 'Remote control is disabled for this server.' })
       if (command === 'agent_offline') return res.status(409).json({ error: 'agent_offline', message: 'This service agent is offline. Reconnect it from the Agents page, then try again.' })
       if (command === 'protected') return res.status(409).json({ error: 'service_protected', message: 'NodeDeck control-plane containers are protected from self-management.' })
       publishSnapshotChanged(user.organizationId)
