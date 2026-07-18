@@ -3,7 +3,8 @@ set -eu
 
 ENROLLMENT_TOKEN=${1:-}
 CONTROL_URL=${2:-}
-AGENT_RELEASE_REF=cb452c2de95e3ce734f8f9a87b308bcc6917254f
+AGENT_RELEASE_REF=de5eb12a566e88c327220b87e35980b5264e2204
+AGENT_RELEASE_SHA256=1e48acbe0f9c2e19873d8868e951b6c2027d9da65fd66136b66a690d48bccbc3
 ARCHIVE_URL="https://github.com/Alex-dev-sys/nodedeck/archive/${AGENT_RELEASE_REF}.tar.gz"
 
 [ -n "$ENROLLMENT_TOKEN" ] || { echo "Missing one-time enrollment token." >&2; exit 1; }
@@ -15,6 +16,14 @@ esac
 case "$CONTROL_URL" in *@*) echo "NodeDeck control URL cannot contain credentials." >&2; exit 1 ;; esac
 command -v curl >/dev/null 2>&1 || { echo "curl is required." >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { echo "tar is required." >&2; exit 1; }
+if command -v sha256sum >/dev/null 2>&1; then
+  calculate_sha256() { sha256sum "$1" | awk '{print $1}'; }
+elif command -v shasum >/dev/null 2>&1; then
+  calculate_sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+else
+  echo "sha256sum or shasum is required." >&2
+  exit 1
+fi
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "Installing the small jq dependency…"
@@ -43,7 +52,10 @@ cleanup() { rm -rf "$NODEDECK_DIR"; }
 trap cleanup EXIT HUP INT TERM
 
 echo "Downloading NodeDeck agent…"
-curl --proto '=https' --tlsv1.2 -fsSL "$ARCHIVE_URL" | tar -xz -C "$NODEDECK_DIR" --strip-components=1
+ARCHIVE_PATH="$NODEDECK_DIR/agent.tar.gz"
+curl --proto '=https' --tlsv1.2 -fsSL "$ARCHIVE_URL" -o "$ARCHIVE_PATH"
+[ "$(calculate_sha256 "$ARCHIVE_PATH")" = "$AGENT_RELEASE_SHA256" ] || { echo "NodeDeck rejected the agent archive: SHA-256 mismatch." >&2; exit 1; }
+tar -xzf "$ARCHIVE_PATH" -C "$NODEDECK_DIR" --strip-components=1
 AGENT_TOKEN=$(jq -cn --arg token "$ENROLLMENT_TOKEN" --arg hostname "$(hostname)" '{token: $token, hostname: $hostname}' | curl -fsS -X POST "${CONTROL_URL%/}/agent/v1/enroll" \
   -H 'Content-Type: application/json' \
   --data-binary @- | jq -er .agentToken)
