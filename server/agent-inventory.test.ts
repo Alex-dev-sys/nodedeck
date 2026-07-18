@@ -195,6 +195,7 @@ esac
     const payload = JSON.parse(result.stdout) as { services: Array<Record<string, unknown>> }
     expect(payload.services.filter((service) => service.kind === 'launchd')).toEqual([
       expect.objectContaining({ id: 'launchd-user:ai.hermes.gateway', name: 'ai.hermes.gateway', status: 'healthy', cpu: 2.5, ram: 1.5 }),
+      expect.objectContaining({ id: 'launchd-user:com.google.updater', name: 'com.google.updater', status: 'offline', cpu: 0, ram: 0 }),
       expect.objectContaining({ id: 'launchd-user:homebrew.mxcl.postgresql@16', name: 'homebrew.mxcl.postgresql@16', status: 'healthy', cpu: 2.5, ram: 1.5 }),
     ])
   })

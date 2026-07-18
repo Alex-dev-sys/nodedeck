@@ -12,11 +12,19 @@ import { errorHandler, requireAuth, requireRole, type AuthenticatedRequest } fro
 import { deliverPendingNotifications } from './maintenance.js'
 import { sendNotification, validateWebhookUrl, type NotificationChannelConfig } from './notifications.js'
 import { registerOwner, RegistrationConflictError, registrationSchema } from './registration.js'
+import { enqueueDueSchedules, normalizeDays, validTimeZone } from './schedules.js'
 import { openSecret, sealSecret } from './secrets.js'
 import { agentCredentialKey, clientAddress, rateLimit, securityHeaders } from './security.js'
 
 const loginSchema = z.object({ email: z.string().trim().email().max(320), password: z.string().min(1).max(128) }).strict()
 const commandSchema = z.object({ action: z.enum(['start', 'restart', 'stop']) }).strict()
+const scheduleSchema = z.object({
+  action: z.enum(['start', 'restart', 'stop']),
+  localTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  daysOfWeek: z.array(z.coerce.number().int().min(0).max(6)).min(1).max(7),
+  timezone: z.string().trim().min(1).max(80).refine(validTimeZone, 'Unknown IANA timezone.'),
+  enabled: z.boolean().default(true),
+}).strict()
 const servicePolicySchema = z.object({
   displayName: z.string().trim().min(1).max(80).nullable(),
   controlEnabled: z.boolean(),
@@ -195,6 +203,7 @@ async function snapshot(pool: Pool, organizationId: string) {
               (s.container_id IS NOT NULL AND (
                 s.kind = 'docker'
                 OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
+                OR (s.kind = 'launchd' AND s.container_id LIKE 'launchd-user:%')
                 OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
               )) AS managed,
               s.updated_at AS "updatedAt"
@@ -230,6 +239,25 @@ async function snapshot(pool: Pool, organizationId: string) {
     },
     serverTimeMs: Date.now(),
   }
+}
+
+async function listServiceSchedules(pool: Pool, organizationId: string, serviceId: string) {
+  return pool.query(
+    `SELECT sch.id, sch.action, to_char(sch.local_time, 'HH24:MI') AS "localTime",
+            sch.days_of_week AS "daysOfWeek", sch.timezone, sch.enabled,
+            sch.last_run_at AS "lastRunAt", next_run.next_run_at AS "nextRunAt",
+            sch.created_at AS "createdAt", sch.updated_at AS "updatedAt"
+     FROM service_schedules sch
+     LEFT JOIN LATERAL (
+       SELECT min(((((now() AT TIME ZONE sch.timezone)::date + offsets.day) + sch.local_time) AT TIME ZONE sch.timezone)) AS next_run_at
+       FROM generate_series(0, 7) AS offsets(day)
+       WHERE EXTRACT(DOW FROM ((now() AT TIME ZONE sch.timezone)::date + offsets.day))::smallint = ANY(sch.days_of_week)
+         AND ((((now() AT TIME ZONE sch.timezone)::date + offsets.day) + sch.local_time) AT TIME ZONE sch.timezone) > now()
+     ) next_run ON true
+     WHERE sch.organization_id = $1 AND sch.service_id = $2
+     ORDER BY sch.enabled DESC, sch.local_time, sch.created_at`,
+    [organizationId, serviceId],
+  )
 }
 
 function writeEvent(res: Response, event: string, body: unknown) {
@@ -949,7 +977,7 @@ export function createApp(config: Config, pool: Pool) {
              AND s.status = 'offline' AND s.runtime_state IS DISTINCT FROM 'missing'
              AND s.desired_state = 'running' AND p.auto_recovery = true AND p.control_enabled = true
              AND s.is_protected = false
-             AND (s.kind = 'docker' OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%') OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%'))
+             AND (s.kind = 'docker' OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%') OR (s.kind = 'launchd' AND s.container_id LIKE 'launchd-user:%') OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%'))
              AND NOT EXISTS (
                SELECT 1 FROM commands c WHERE c.service_id = s.id AND c.action = 'restart'
                  AND (c.status IN ('queued', 'running') OR c.created_at > now() - make_interval(secs => p.recovery_delay_sec))
@@ -1003,6 +1031,7 @@ export function createApp(config: Config, pool: Pool) {
       )
       if (!agent.rowCount) return 'invalid' as const
       if (!agent.rows[0].remoteControl) return null
+      await enqueueDueSchedules(client, agent.rows[0].id)
       await client.query(`UPDATE commands SET status = 'expired', completed_at = now(), result = $2::jsonb
         WHERE agent_id = $1 AND status = 'queued' AND expires_at <= now()`, [agent.rows[0].id, JSON.stringify({ message: 'Command expired before the agent claimed it.' })])
       await client.query(`UPDATE commands SET status = 'expired', completed_at = now(), result = $2::jsonb
@@ -1110,6 +1139,7 @@ export function createApp(config: Config, pool: Pool) {
                   (s.container_id IS NOT NULL AND (
                     s.kind = 'docker'
                     OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
+                    OR (s.kind = 'launchd' AND s.container_id LIKE 'launchd-user:%')
                     OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
                   )) AS managed
            FROM services s WHERE s.id = $1 AND s.organization_id = $2 FOR UPDATE`,
@@ -1146,6 +1176,130 @@ export function createApp(config: Config, pool: Pool) {
       if (outcome === 'auto_recovery_unavailable') return res.status(409).json({ error: 'auto_recovery_unavailable', message: 'Auto recovery is unavailable for protected or monitoring-only services.' })
       publishSnapshotChanged(user.organizationId)
       res.json({ settings: outcome })
+    },
+  )
+
+  app.get('/api/v1/services/:serviceId/schedules', requireAuth(config), async (req: AuthenticatedRequest, res) => {
+    const serviceId = serviceIdSchema.parse(req.params.serviceId)
+    const exists = await pool.query('SELECT id FROM services WHERE id = $1 AND organization_id = $2', [serviceId, req.user!.organizationId])
+    if (!exists.rowCount) return res.status(404).json({ error: 'service_not_found' })
+    const schedules = await listServiceSchedules(pool, req.user!.organizationId, serviceId)
+    res.json({ schedules: schedules.rows })
+  })
+
+  app.post(
+    '/api/v1/services/:serviceId/schedules',
+    requireAuth(config),
+    requireRole('owner', 'admin'),
+    async (req: AuthenticatedRequest, res) => {
+      const input = scheduleSchema.parse(req.body)
+      const daysOfWeek = normalizeDays(input.daysOfWeek)
+      const serviceId = serviceIdSchema.parse(req.params.serviceId)
+      const user = req.user!
+      const outcome = await inTransaction(pool, async (client) => {
+        const service = await client.query<{ protected: boolean; managed: boolean; controlEnabled: boolean }>(
+          `SELECT s.is_protected AS protected, COALESCE(p.control_enabled, true) AS "controlEnabled",
+                  (s.container_id IS NOT NULL AND (
+                    s.kind = 'docker'
+                    OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
+                    OR (s.kind = 'launchd' AND s.container_id LIKE 'launchd-user:%')
+                    OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
+                  )) AS managed
+           FROM services s LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
+           WHERE s.id = $1 AND s.organization_id = $2 FOR UPDATE OF s`,
+          [serviceId, user.organizationId],
+        )
+        const current = service.rows[0]
+        if (!current) return 'missing' as const
+        if (current.protected || !current.managed || !current.controlEnabled) return 'unavailable' as const
+        const created = await client.query<{ id: string }>(
+          `INSERT INTO service_schedules (
+             organization_id, service_id, action, local_time, days_of_week, timezone, enabled,
+             last_run_local_date, created_by, updated_by
+           ) VALUES (
+             $1, $2, $3, $4::time, $5::smallint[], $6, $7,
+             CASE WHEN (now() AT TIME ZONE $6)::time >= $4::time THEN (now() AT TIME ZONE $6)::date ELSE NULL END,
+             $8, $8
+           ) RETURNING id`,
+          [user.organizationId, serviceId, input.action, input.localTime, daysOfWeek, input.timezone, input.enabled, user.id],
+        )
+        await client.query(
+          `INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
+           VALUES ($1, $2, 'service.schedule.create', $3, 'ok', $4::jsonb)`,
+          [user.organizationId, user.id, serviceId, JSON.stringify({ scheduleId: created.rows[0].id, action: input.action, localTime: input.localTime, daysOfWeek, timezone: input.timezone })],
+        )
+        return created.rows[0]
+      })
+      if (outcome === 'missing') return res.status(404).json({ error: 'service_not_found' })
+      if (outcome === 'unavailable') return res.status(409).json({ error: 'service_schedule_unavailable', message: 'Enable remote control for a managed, non-protected service before adding a schedule.' })
+      const schedules = await listServiceSchedules(pool, user.organizationId, serviceId)
+      res.status(201).json({ schedule: schedules.rows.find((schedule: { id: string }) => schedule.id === outcome.id) })
+    },
+  )
+
+  app.put(
+    '/api/v1/services/:serviceId/schedules/:scheduleId',
+    requireAuth(config),
+    requireRole('owner', 'admin'),
+    async (req: AuthenticatedRequest, res) => {
+      const input = scheduleSchema.parse(req.body)
+      const daysOfWeek = normalizeDays(input.daysOfWeek)
+      const serviceId = serviceIdSchema.parse(req.params.serviceId)
+      const scheduleId = uuidSchema.parse(req.params.scheduleId)
+      const user = req.user!
+      const updated = await inTransaction(pool, async (client) => {
+        const result = await client.query<{ id: string }>(
+          `UPDATE service_schedules sch SET
+             action = $5, local_time = $6::time, days_of_week = $7::smallint[], timezone = $8, enabled = $9,
+             last_run_local_date = CASE WHEN (now() AT TIME ZONE $8)::time >= $6::time THEN (now() AT TIME ZONE $8)::date ELSE NULL END,
+             updated_by = $3, updated_at = now()
+           FROM services s LEFT JOIN service_policies p ON p.service_id = s.id AND p.organization_id = s.organization_id
+           WHERE sch.id = $1 AND sch.service_id = $2 AND sch.organization_id = $4
+             AND s.id = sch.service_id AND s.organization_id = sch.organization_id
+             AND ($9 = false OR (
+               s.is_protected = false AND COALESCE(p.control_enabled, true) = true AND s.container_id IS NOT NULL AND (
+                 s.kind = 'docker'
+                 OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
+                 OR (s.kind = 'launchd' AND s.container_id LIKE 'launchd-user:%')
+                 OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
+               )
+             ))
+           RETURNING sch.id`,
+          [scheduleId, serviceId, user.id, user.organizationId, input.action, input.localTime, daysOfWeek, input.timezone, input.enabled],
+        )
+        if (!result.rowCount) return null
+        await client.query(
+          `INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
+           VALUES ($1, $2, 'service.schedule.update', $3, 'ok', $4::jsonb)`,
+          [user.organizationId, user.id, serviceId, JSON.stringify({ scheduleId, action: input.action, localTime: input.localTime, daysOfWeek, timezone: input.timezone, enabled: input.enabled })],
+        )
+        return result.rows[0]
+      })
+      if (!updated) return res.status(404).json({ error: 'schedule_not_found_or_unavailable' })
+      const schedules = await listServiceSchedules(pool, user.organizationId, serviceId)
+      res.json({ schedule: schedules.rows.find((schedule: { id: string }) => schedule.id === scheduleId) })
+    },
+  )
+
+  app.delete(
+    '/api/v1/services/:serviceId/schedules/:scheduleId',
+    requireAuth(config),
+    requireRole('owner', 'admin'),
+    async (req: AuthenticatedRequest, res) => {
+      const serviceId = serviceIdSchema.parse(req.params.serviceId)
+      const scheduleId = uuidSchema.parse(req.params.scheduleId)
+      const user = req.user!
+      const removed = await pool.query(
+        `DELETE FROM service_schedules WHERE id = $1 AND service_id = $2 AND organization_id = $3 RETURNING id`,
+        [scheduleId, serviceId, user.organizationId],
+      )
+      if (!removed.rowCount) return res.status(404).json({ error: 'schedule_not_found' })
+      await pool.query(
+        `INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
+         VALUES ($1, $2, 'service.schedule.delete', $3, 'ok', $4::jsonb)`,
+        [user.organizationId, user.id, serviceId, JSON.stringify({ scheduleId })],
+      )
+      res.status(204).end()
     },
   )
 
@@ -1249,6 +1403,7 @@ export function createApp(config: Config, pool: Pool) {
                   (s.container_id IS NOT NULL AND (
                     s.kind = 'docker'
                     OR (s.kind = 'systemd' AND s.container_id LIKE 'systemd-user:%')
+                    OR (s.kind = 'launchd' AND s.container_id LIKE 'launchd-user:%')
                     OR (s.kind = 'pm2' AND s.container_id LIKE 'pm2:%')
                   )) AS managed,
                   COALESCE(p.control_enabled, true) AS "controlEnabled",

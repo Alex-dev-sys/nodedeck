@@ -60,6 +60,29 @@ export interface RemoteServiceSettings {
   updatedAt: string | null
 }
 
+export type ScheduledAction = 'start' | 'restart' | 'stop'
+
+export interface ServiceSchedule {
+  id: string
+  action: ScheduledAction
+  localTime: string
+  daysOfWeek: number[]
+  timezone: string
+  enabled: boolean
+  lastRunAt: string | null
+  nextRunAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ServiceScheduleInput {
+  action: ScheduledAction
+  localTime: string
+  daysOfWeek: number[]
+  timezone: string
+  enabled: boolean
+}
+
 export type BillingPlan = 'free' | 'pro' | 'team'
 
 export interface BillingPlanDetails {
@@ -141,6 +164,22 @@ export async function fetchServiceSettings(accessToken: string, serviceId: strin
 
 export async function updateServiceSettings(accessToken: string, serviceId: string, input: ServiceSettingsInput) {
   return mutate<{ settings: RemoteServiceSettings }>(`/api/v1/services/${encodeURIComponent(serviceId)}/settings`, accessToken, { method: 'PUT', body: JSON.stringify(input) })
+}
+
+export async function fetchServiceSchedules(accessToken: string, serviceId: string) {
+  return request<{ schedules: ServiceSchedule[] }>(`/api/v1/services/${encodeURIComponent(serviceId)}/schedules`, accessToken)
+}
+
+export async function createServiceSchedule(accessToken: string, serviceId: string, input: ServiceScheduleInput) {
+  return mutate<{ schedule: ServiceSchedule }>(`/api/v1/services/${encodeURIComponent(serviceId)}/schedules`, accessToken, { method: 'POST', body: JSON.stringify(input) })
+}
+
+export async function updateServiceSchedule(accessToken: string, serviceId: string, scheduleId: string, input: ServiceScheduleInput) {
+  return mutate<{ schedule: ServiceSchedule }>(`/api/v1/services/${encodeURIComponent(serviceId)}/schedules/${encodeURIComponent(scheduleId)}`, accessToken, { method: 'PUT', body: JSON.stringify(input) })
+}
+
+export async function deleteServiceSchedule(accessToken: string, serviceId: string, scheduleId: string) {
+  return mutate(`/api/v1/services/${encodeURIComponent(serviceId)}/schedules/${encodeURIComponent(scheduleId)}`, accessToken, { method: 'DELETE' })
 }
 
 export async function fetchHostMetrics(accessToken: string, range: string) {

@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,10 +18,10 @@ function fakeCommand(directory: string, name: string, body: string) {
   chmodSync(path, 0o755)
 }
 
-function run(directory: string, action: string, kind: string, resourceKey: string) {
+function run(directory: string, action: string, kind: string, resourceKey: string, environment: Record<string, string> = {}) {
   return spawnSync(commandScript, [action, kind, resourceKey], {
     encoding: 'utf8',
-    env: { ...process.env, PATH: `${directory}:${process.env.PATH ?? ''}` },
+    env: { ...process.env, ...environment, PATH: `${directory}:${process.env.PATH ?? ''}` },
   })
 }
 
@@ -75,4 +75,32 @@ exit 0`)
     expect(result.status, result.stderr).toBe(0)
     expect(JSON.parse(result.stdout)).toMatchObject({ observedState: 'online' })
   })
+
+  it('starts and stops a user LaunchAgent using only its matching plist', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'nodedeck-launchd-command-'))
+    temporaryDirectories.push(directory)
+    const launchAgents = join(directory, 'Library', 'LaunchAgents')
+    mkdirSync(launchAgents, { recursive: true })
+    writeFileSync(join(launchAgents, 'com.example.worker.plist'), '<plist/>')
+    const state = join(directory, 'launchd-running')
+    fakeCommand(directory, 'uname', 'printf %s Darwin')
+    fakeCommand(directory, 'id', 'printf %s 501')
+    fakeCommand(directory, 'plutil', 'printf %s com.example.worker')
+    fakeCommand(directory, 'sleep', 'exit 0')
+    fakeCommand(directory, 'launchctl', `
+case "$1" in
+  print) [ -f "${state}" ] ;;
+  bootstrap|kickstart) touch "${state}" ;;
+  bootout) rm -f "${state}" ;;
+  *) exit 1 ;;
+esac`)
+
+    const started = run(directory, 'start', 'launchd', 'launchd-user:com.example.worker', { HOME: directory })
+    const stopped = run(directory, 'stop', 'launchd', 'launchd-user:com.example.worker', { HOME: directory })
+
+    expect(started.status, started.stderr).toBe(0)
+    expect(JSON.parse(started.stdout)).toMatchObject({ observedState: 'running' })
+    expect(stopped.status, stopped.stderr).toBe(0)
+    expect(JSON.parse(stopped.stdout)).toMatchObject({ observedState: 'stopped' })
+  }, 10_000)
 })

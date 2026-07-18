@@ -2,8 +2,9 @@
 
 NodeDeck is a lightweight control plane for server projects. It provides a React dashboard,
 an Express/PostgreSQL API, and a restricted local agent that discovers Docker Compose projects,
-standalone containers, custom systemd services, and PM2 processes without creating duplicate
-entries. Remote control is currently limited to standalone Docker containers.
+standalone containers, custom systemd services, macOS LaunchAgents, and PM2 processes without
+creating duplicate entries. Its allowlisted controls cover Docker, user services, and PM2 without
+accepting arbitrary shell commands.
 
 ## Local release
 
@@ -72,10 +73,15 @@ Owners and admins can revoke an agent from **Agents**. Revocation immediately in
 credential and marks its managed services offline; it never stops or deletes containers on the host.
 
 NodeDeck can start, stop, and restart standalone Docker containers, whole Docker Compose projects,
-user-level systemd services, and PM2 processes. System-level systemd units stay monitoring-only,
-and the NodeDeck control plane is protected from managing itself. On macOS, running user
-LaunchAgents are discovered automatically as monitoring-only services; NodeDeck, PM2, and idle
-jobs are excluded so they do not duplicate or clutter the project list.
+user-level systemd services, user LaunchAgents on macOS, and PM2 processes. System-level systemd
+units stay monitoring-only, and the NodeDeck control plane is protected from managing itself.
+Stopped user LaunchAgents remain visible so they can be started again; NodeDeck and PM2 launch jobs
+are excluded so they do not duplicate or clutter the project list.
+
+Owners and admins can add multiple timezone-aware schedules to each manageable process, such as a
+weekday start, nightly stop, and weekly maintenance restart. Schedules are stored in the control
+plane, audited, deduplicated per local day, and converted into the same short-lived allowlisted
+commands the agent already executes. They continue to work while the dashboard is closed.
 
 ### Start on macOS automatically
 
@@ -101,8 +107,9 @@ launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.server-os.agent
 Commands are organization-scoped and tied to the agent that owns the discovered resource. They
 expire after ten minutes, are leased for two minutes once claimed, and are reported as queued,
 running, succeeded, failed, or expired. The agent validates the same allowlist before invoking
-Docker, systemd, or PM2 and accepts no arbitrary shell command from the API. Browser-issued commands carry an
-idempotency key, so a repeated click or network retry does not queue a duplicate action.
+Docker, user systemd, user launchd, or PM2 actions and accepts no arbitrary shell command from the
+API. Browser-issued and scheduled commands carry idempotency keys, so a repeated click, poll, or
+network retry does not queue a duplicate action.
 
 The dashboard receives snapshots through same-origin Server-Sent Events authenticated by the
 HttpOnly refresh cookie. If the browser does not support EventSource, it falls back to polling.

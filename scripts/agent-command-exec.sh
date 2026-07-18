@@ -115,6 +115,49 @@ pm2)
   fi
   succeed
   ;;
+launchd)
+  [ "$(uname -s)" = Darwin ] || fail "launchd control is available only on macOS."
+  command -v launchctl >/dev/null 2>&1 || fail "launchctl is not available on this host."
+  command -v plutil >/dev/null 2>&1 || fail "plutil is not available on this host."
+  case "$RESOURCE_KEY" in launchd-user:*) label=${RESOURCE_KEY#launchd-user:} ;; *) fail "Invalid launchd resource identifier." ;; esac
+  case "$label" in *[!A-Za-z0-9_.:-]*|'') fail "Invalid launchd label." ;; esac
+  plist="$HOME/Library/LaunchAgents/${label}.plist"
+  [ -f "$plist" ] || fail "The LaunchAgent plist no longer exists."
+  plist_label=$(plutil -extract Label raw -o - "$plist" 2>/dev/null || true)
+  [ "$plist_label" = "$label" ] || fail "The LaunchAgent label does not match its plist."
+  domain="gui/$(id -u)"
+  target="${domain}/${label}"
+  case "$ACTION" in
+    stop)
+      if launchctl print "$target" >/dev/null 2>&1; then
+        launchctl bootout "$target" >>"$OUTPUT_FILE" 2>&1 || fail "launchd could not stop ${label}."
+      fi
+      ;;
+    start)
+      if ! launchctl print "$target" >/dev/null 2>&1; then
+        launchctl bootstrap "$domain" "$plist" >>"$OUTPUT_FILE" 2>&1 || fail "launchd could not load ${label}."
+      fi
+      launchctl kickstart "$target" >>"$OUTPUT_FILE" 2>&1 || fail "launchd could not start ${label}."
+      ;;
+    restart)
+      if launchctl print "$target" >/dev/null 2>&1; then
+        launchctl kickstart -k "$target" >>"$OUTPUT_FILE" 2>&1 || fail "launchd could not restart ${label}."
+      else
+        launchctl bootstrap "$domain" "$plist" >>"$OUTPUT_FILE" 2>&1 || fail "launchd could not load ${label}."
+        launchctl kickstart "$target" >>"$OUTPUT_FILE" 2>&1 || fail "launchd could not start ${label}."
+      fi
+      ;;
+  esac
+  sleep 1
+  if launchctl print "$target" >/dev/null 2>&1; then OBSERVED_STATE=running; else OBSERVED_STATE=stopped; fi
+  HEALTH_STATUS=none
+  if [ "$ACTION" = stop ]; then
+    [ "$OBSERVED_STATE" = stopped ] || fail "The LaunchAgent is still running."
+  else
+    [ "$OBSERVED_STATE" = running ] || fail "The LaunchAgent did not become available."
+  fi
+  succeed
+  ;;
 *)
   fail "Unsupported service source: $KIND"
   ;;

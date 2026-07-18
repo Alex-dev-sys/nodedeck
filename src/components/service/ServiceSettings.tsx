@@ -8,6 +8,7 @@ import { infraKey } from '@/app/queryClient'
 import { useAuth } from '@/stores/auth'
 import { useToasts } from '@/stores/toasts'
 import { cn } from '@/lib/utils'
+import { ServiceSchedules } from './ServiceSchedules'
 
 const DEFAULTS: ServiceSettingsInput = {
   displayName: null,
@@ -20,28 +21,52 @@ const DEFAULTS: ServiceSettingsInput = {
 
 export function ServiceSettings({ service, mode = 'icon' }: { service: Service; mode?: 'icon' | 'tool' }) {
   const [open, setOpen] = useState(false)
+  const [loadError, setLoadError] = useState<Error | null>(null)
   const accessToken = useAuth((state) => state.accessToken)
   const role = useAuth((state) => state.user?.role)
   const canEdit = role === 'owner' || role === 'admin'
   const queryClient = useQueryClient()
   const pushToast = useToasts((state) => state.push)
+  const settingsKey = ['service-settings', service.id] as const
   const settings = useQuery({
-    queryKey: ['service-settings', service.id],
+    queryKey: settingsKey,
     queryFn: () => fetchServiceSettings(accessToken!, service.id),
-    enabled: open && Boolean(accessToken),
+    enabled: Boolean(accessToken),
+    networkMode: 'always',
+    placeholderData: {
+      settings: {
+        displayName: null,
+        controlEnabled: service.controlEnabled ?? true,
+        autoRecovery: service.autoRecovery ?? false,
+        recoveryDelaySec: DEFAULTS.recoveryDelaySec,
+        cpuAlertThreshold: DEFAULTS.cpuAlertThreshold,
+        ramAlertThreshold: DEFAULTS.ramAlertThreshold,
+        protected: service.protected ?? false,
+        updatedAt: null,
+      },
+    },
   })
+  const openSettings = () => {
+    setOpen(true)
+    setLoadError(null)
+    if (!accessToken) return
+    void fetchServiceSettings(accessToken, service.id)
+      .then((data) => queryClient.setQueryData(settingsKey, data))
+      .catch((error: unknown) => setLoadError(error instanceof Error ? error : new Error('Could not load project settings.')))
+  }
   const save = useMutation({
-    mutationFn: (input: ServiceSettingsInput) => updateServiceSettings(accessToken!, service.id, input),
+    mutationFn: (input: ServiceSettingsInput) => updateServiceSettings(useAuth.getState().accessToken!, service.id, input),
+    networkMode: 'always',
     onSuccess: (data) => {
-      queryClient.setQueryData(['service-settings', service.id], data)
+      queryClient.setQueryData(settingsKey, data)
       void queryClient.invalidateQueries({ queryKey: infraKey })
       pushToast({ title: `${service.name} settings saved`, message: 'The control plane and agent will use the new policy.', tone: 'success' })
     },
   })
 
   return <>
-    {mode === 'icon' ? <button type="button" onClick={() => setOpen(true)} title="Service settings" aria-label="Service settings" className="grid h-9 w-9 place-items-center rounded-xl border border-border bg-surface-2 text-fg-muted transition-colors hover:text-fg"><Settings2 className="h-4 w-4" /></button>
-      : <button type="button" onClick={() => setOpen(true)} title="Service settings" className="flex flex-col items-center gap-1.5 rounded-xl border border-border-soft bg-surface-2 py-2.5 text-fg-muted transition-colors hover:border-fg-faint hover:text-fg"><Settings2 className="h-4 w-4" /><span className="text-[10px]">Config</span></button>}
+    {mode === 'icon' ? <button type="button" onClick={openSettings} title="Service settings" aria-label="Service settings" className="grid h-9 w-9 place-items-center rounded-xl border border-border bg-surface-2 text-fg-muted transition-colors hover:text-fg"><Settings2 className="h-4 w-4" /></button>
+      : <button type="button" onClick={openSettings} title="Service settings" className="flex flex-col items-center gap-1.5 rounded-xl border border-border-soft bg-surface-2 py-2.5 text-fg-muted transition-colors hover:border-fg-faint hover:text-fg"><Settings2 className="h-4 w-4" /><span className="text-[10px]">Config</span></button>}
 
     <AnimatePresence>
       {open && <div className="fixed inset-0 z-[75] flex justify-end">
@@ -53,8 +78,8 @@ export function ServiceSettings({ service, mode = 'icon' }: { service: Service; 
             <button type="button" onClick={() => setOpen(false)} disabled={save.isPending} aria-label="Close settings" className="text-fg-faint transition-colors hover:text-fg disabled:opacity-50"><X className="h-5 w-5" /></button>
           </header>
 
-          {settings.isLoading && <div className="p-5 text-sm text-fg-muted">Loading settings…</div>}
-          {settings.isError && <div className="p-5 text-sm text-danger">Could not load project settings.</div>}
+          {settings.isLoading && !loadError && <div className="p-5 text-sm text-fg-muted">Loading settings…</div>}
+          {(settings.isError || loadError) && <div className="border-b border-danger/20 bg-danger/10 px-5 py-2.5 text-[12px] text-danger">{loadError?.message ?? 'Could not refresh project settings. Safe defaults are shown below.'}</div>}
           {settings.data && <SettingsForm key={`${service.id}:${settings.data.settings.updatedAt ?? 'default'}`} service={service} initial={settings.data.settings} canEdit={canEdit} pending={save.isPending} error={save.error} onSave={(input) => save.mutate(input)} />}
         </motion.aside>
       </div>}
@@ -71,7 +96,7 @@ function SettingsForm({ service, initial, canEdit, pending, error, onSave }: { s
     cpuAlertThreshold: initial.cpuAlertThreshold,
     ramAlertThreshold: initial.ramAlertThreshold,
   }))
-  const recoveryAvailable = service.managed && !service.protected
+  const recoveryAvailable = Boolean(service.managed && !service.protected)
   const disabled = !canEdit || pending
   const reset = () => setDraft(DEFAULTS)
 
@@ -85,6 +110,8 @@ function SettingsForm({ service, initial, canEdit, pending, error, onSave }: { s
       <SettingRow label="Remote control" hint="Allow start, restart and stop from NodeDeck"><Switch label="Remote control" on={draft.controlEnabled} disabled={disabled || service.protected || !service.managed} onClick={() => setDraft((current) => ({ ...current, controlEnabled: !current.controlEnabled, autoRecovery: current.controlEnabled ? false : current.autoRecovery }))} /></SettingRow>
       <SettingRow label="Automatic recovery" hint="Restart this project after an unexpected stop"><Switch label="Automatic recovery" on={draft.autoRecovery} disabled={disabled || !recoveryAvailable || !draft.controlEnabled} onClick={() => setDraft((current) => ({ ...current, autoRecovery: !current.autoRecovery }))} /></SettingRow>
       <SettingRow label="Recovery delay" hint="Wait before another automatic restart"><select value={draft.recoveryDelaySec} onChange={(event) => setDraft((current) => ({ ...current, recoveryDelaySec: Number(event.target.value) }))} disabled={disabled || !draft.autoRecovery} className="h-9 rounded-lg border border-border bg-surface-2 px-2.5 text-[12px] text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"><option value={60}>1 minute</option><option value={120}>2 minutes</option><option value={300}>5 minutes</option><option value={900}>15 minutes</option></select></SettingRow>
+
+      <ServiceSchedules serviceId={service.id} canEdit={canEdit} available={recoveryAvailable && initial.controlEnabled} />
 
       <div className="border-t border-border-soft pt-5"><div className="mb-1 text-[13px] font-semibold text-fg">Resource alerts</div><div className="mb-5 text-[11px] text-fg-faint">Create an alert when this project crosses its own limit</div><div className="space-y-5"><RangeSetting label="CPU warning" value={draft.cpuAlertThreshold} min={50} max={100} suffix="%" disabled={disabled} onChange={(cpuAlertThreshold) => setDraft((current) => ({ ...current, cpuAlertThreshold }))} /><RangeSetting label="RAM warning" value={draft.ramAlertThreshold} min={50} max={100} suffix="%" disabled={disabled} onChange={(ramAlertThreshold) => setDraft((current) => ({ ...current, ramAlertThreshold }))} /></div></div>
       {error && <p className="rounded-lg border border-danger/30 bg-danger/10 p-3 text-[12px] text-danger">{error.message}</p>}

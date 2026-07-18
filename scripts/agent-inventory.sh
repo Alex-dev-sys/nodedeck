@@ -149,7 +149,11 @@ collect_launchd_services() {
 
         details=$(launchctl print "gui/$(id -u)/$label" 2>/dev/null || true)
         state=$(printf '%s\n' "$details" | sed -n 's/^[[:space:]]*state = //p' | head -n 1)
-        [ "$state" = running ] || continue
+        if [ "$state" = running ]; then
+          status=healthy
+        else
+          status=offline
+        fi
         pid=$(printf '%s\n' "$details" | sed -n 's/^[[:space:]]*pid = //p' | head -n 1)
         case "$pid" in *[!0-9]*|'') pid= ;; esac
 
@@ -170,10 +174,11 @@ collect_launchd_services() {
           --arg id "launchd-user:$label" \
           --arg name "$label" \
           --arg image "$program" \
-          --arg runtimeState "$state" \
+          --arg status "$status" \
+          --arg runtimeState "${state:-unloaded}" \
           --argjson cpu "$(awk -v value="$cpu" 'BEGIN { capped = value > 100 ? 100 : value; print capped }')" \
           --argjson ram "$(awk -v value="$ram" 'BEGIN { capped = value > 100 ? 100 : value; print capped }')" \
-          '{id:$id,name:$name,kind:"launchd",image:$image,status:"healthy",cpu:$cpu,ram:$ram,runtimeState:$runtimeState,healthStatus:"none",restartCount:0,ports:[],protected:false}'
+          '{id:$id,name:$name,kind:"launchd",image:$image,status:$status,cpu:$cpu,ram:$ram,runtimeState:$runtimeState,healthStatus:"none",restartCount:0,ports:[],protected:false}'
       done
     fi
   fi
