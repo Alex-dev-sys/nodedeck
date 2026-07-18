@@ -103,9 +103,9 @@ const passwordChangeSchema = z.object({
 })
 const uuidSchema = z.string().uuid()
 const serviceIdSchema = z.string().min(1).max(128)
-const AGENT_RELEASE_VERSION = '2026.07.18.2'
-const AGENT_RELEASE_REF = 'de5eb12a566e88c327220b87e35980b5264e2204'
-const AGENT_RELEASE_ARCHIVE_SHA256 = '1e48acbe0f9c2e19873d8868e951b6c2027d9da65fd66136b66a690d48bccbc3'
+const AGENT_RELEASE_VERSION = '2026.07.19.1'
+const AGENT_RELEASE_REF = '72972806e6d5389fa1408945e17c697a3b13bd1a'
+const AGENT_RELEASE_ARCHIVE_SHA256 = '898a71d5b9f8d29628b52c29d8495f2be2b0c2f8aa837322b8fa11bbf088fa67'
 
 function tokenHash(token: string) {
   return createHash('sha256').update(token).digest('hex')

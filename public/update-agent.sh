@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-AGENT_RELEASE_REF=de5eb12a566e88c327220b87e35980b5264e2204
-AGENT_RELEASE_SHA256=1e48acbe0f9c2e19873d8868e951b6c2027d9da65fd66136b66a690d48bccbc3
+AGENT_RELEASE_REF=72972806e6d5389fa1408945e17c697a3b13bd1a
+AGENT_RELEASE_SHA256=898a71d5b9f8d29628b52c29d8495f2be2b0c2f8aa837322b8fa11bbf088fa67
 ARCHIVE_URL="https://github.com/Alex-dev-sys/nodedeck/archive/${AGENT_RELEASE_REF}.tar.gz"
 
 command -v curl >/dev/null 2>&1 || { echo "curl is required." >&2; exit 1; }
