@@ -60,6 +60,39 @@ export interface RemoteServiceSettings {
   updatedAt: string | null
 }
 
+export type BillingPlan = 'free' | 'pro' | 'team'
+
+export interface BillingPlanDetails {
+  name: string
+  priceMonthly: number
+  servers: number
+  members: number
+  metricRetentionDays: number
+}
+
+export interface BillingSummary {
+  name: string
+  plan: BillingPlan
+  subscriptionStatus: string
+  currentPeriodEnd: string | null
+  cancelAtPeriodEnd: boolean
+  hasCustomer: boolean
+  serversUsed: number
+  membersUsed: number
+  configured: boolean
+  limits: BillingPlanDetails
+  canManage: boolean
+}
+
+export interface SecuritySession {
+  id: string
+  createdAt: string
+  lastSeenAt: string
+  expiresAt: string
+  userAgent: string | null
+  current: boolean
+}
+
 export type ServiceSettingsInput = Pick<RemoteServiceSettings, 'displayName' | 'controlEnabled' | 'autoRecovery' | 'recoveryDelaySec' | 'cpuAlertThreshold' | 'ramAlertThreshold'>
 
 export type NotificationChannelInput =
@@ -128,4 +161,30 @@ export async function testNotificationChannel(accessToken: string, id: string) {
 
 export async function deleteNotificationChannel(accessToken: string, id: string) {
   return mutate(`/api/v1/notification-channels/${encodeURIComponent(id)}`, accessToken, { method: 'DELETE' })
+}
+
+export async function fetchBilling(accessToken: string) {
+  return request<{ billing: BillingSummary; plans: Record<BillingPlan, BillingPlanDetails> }>('/api/v1/billing', accessToken)
+}
+
+export async function createBillingCheckout(accessToken: string, plan: Exclude<BillingPlan, 'free'>) {
+  return mutate<{ url: string }>('/api/v1/billing/checkout', accessToken, { method: 'POST', body: JSON.stringify({ plan }) })
+}
+
+export async function createBillingPortal(accessToken: string) {
+  return mutate<{ url: string }>('/api/v1/billing/portal', accessToken, { method: 'POST' })
+}
+
+export async function fetchSecuritySessions(accessToken: string) {
+  return request<{ sessions: SecuritySession[] }>('/api/v1/security/sessions', accessToken)
+}
+
+export async function revokeOtherSecuritySessions(accessToken: string) {
+  return mutate<{ revoked: number }>('/api/v1/security/sessions', accessToken, { method: 'DELETE' })
+}
+
+export async function changePassword(accessToken: string, currentPassword: string, newPassword: string) {
+  return mutate('/api/v1/security/password', accessToken, {
+    method: 'POST', body: JSON.stringify({ currentPassword, newPassword }),
+  })
 }

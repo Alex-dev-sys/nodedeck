@@ -7,6 +7,7 @@ import {
   Settings,
   Server,
   ClipboardList,
+  CreditCard,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -26,6 +27,7 @@ export const NAV: NavItem[] = [
   { to: '/commands', label: 'Commands', icon: ClipboardList, group: 'ops' },
   { to: '/agents', label: 'Servers', icon: Server, group: 'ops' },
   { to: '/settings', label: 'Notifications', icon: Settings, group: 'ops' },
+  { to: '/billing', label: 'Plan & billing', icon: CreditCard, group: 'ops' },
 ]
 
 export const GROUP_LABEL: Record<NavItem['group'], string> = {

@@ -3,7 +3,8 @@ import { createHash, randomBytes } from 'node:crypto'
 import express, { type Request, type Response } from 'express'
 import type { Pool } from 'pg'
 import { z } from 'zod'
-import { createRefreshToken, hashRefreshToken, signAccessToken, verifyAccessToken, verifyPasswordOrDummy, type Role } from './auth.js'
+import { createRefreshToken, hashPassword, hashRefreshToken, signAccessToken, verifyAccessToken, verifyPasswordOrDummy, type Role } from './auth.js'
+import { billingConfigured, BillingLimitError, PLAN_CATALOG, priceIdForPlan, processStripeWebhook, stripeClient, type BillingPlan } from './billing.js'
 import type { Config } from './config.js'
 import { inTransaction } from './db/pool.js'
 import { publishSnapshotChanged, subscribeSnapshotChanged } from './events.js'
@@ -85,6 +86,13 @@ const notificationChannelSchema = z.discriminatedUnion('kind', [
     url: z.string().url().max(2000),
   }).strict(),
 ])
+const checkoutSchema = z.object({ plan: z.enum(['pro', 'team']) }).strict()
+const passwordChangeSchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string().min(12).max(128),
+}).strict().refine((value) => value.currentPassword !== value.newPassword, {
+  message: 'The new password must be different.', path: ['newPassword'],
+})
 const uuidSchema = z.string().uuid()
 const serviceIdSchema = z.string().min(1).max(128)
 const AGENT_RELEASE_VERSION = '2026.07.18.2'
@@ -93,6 +101,13 @@ const AGENT_RELEASE_ARCHIVE_SHA256 = '1e48acbe0f9c2e19873d8868e951b6c2027d9da65f
 
 function tokenHash(token: string) {
   return createHash('sha256').update(token).digest('hex')
+}
+
+function sessionMetadata(req: Request) {
+  return {
+    userAgent: req.header('user-agent')?.slice(0, 255) ?? null,
+    ipHash: tokenHash(clientAddress(req)),
+  }
 }
 
 function readAgentToken(req: Request) {
@@ -233,6 +248,16 @@ export function createApp(config: Config, pool: Pool) {
     res.setHeader('X-Request-ID', req.requestId)
     next()
   })
+  app.post('/api/v1/billing/webhook', rateLimit(pool, {
+    scope: 'billing.webhook', limit: 120, windowSeconds: 60, key: clientAddress,
+  }), express.raw({ type: 'application/json', limit: '256kb' }), async (req, res, next) => {
+    try {
+      await processStripeWebhook(pool, config, req.body as Buffer, req.header('stripe-signature'))
+      res.json({ received: true })
+    } catch (error) {
+      next(error)
+    }
+  })
   app.use(express.json({ limit: '256kb', strict: true }))
   app.use('/api/v1/auth', rateLimit(pool, {
     scope: 'auth.ip', limit: 120, windowSeconds: 15 * 60, key: clientAddress,
@@ -303,7 +328,9 @@ export function createApp(config: Config, pool: Pool) {
       return
     }
     const refreshToken = createRefreshToken()
-    await pool.query(`INSERT INTO refresh_sessions (user_id, organization_id, token_hash, expires_at) VALUES ($1, $2, $3, now() + interval '30 days')`, [user.id, user.organizationId, hashRefreshToken(refreshToken)])
+    const metadata = sessionMetadata(req)
+    await pool.query(`INSERT INTO refresh_sessions (user_id, organization_id, token_hash, expires_at, user_agent, ip_hash)
+      VALUES ($1, $2, $3, now() + interval '30 days', $4, $5)`, [user.id, user.organizationId, hashRefreshToken(refreshToken), metadata.userAgent, metadata.ipHash])
     setRefreshCookie(res, refreshToken, config)
     res.json({
       accessToken: signAccessToken(user, config),
@@ -342,7 +369,9 @@ export function createApp(config: Config, pool: Pool) {
     const user = result.rows[0]
     if (!user) return res.status(503).json({ error: 'bootstrap_owner_missing' })
     const refreshToken = createRefreshToken()
-    await pool.query(`INSERT INTO refresh_sessions (user_id, organization_id, token_hash, expires_at) VALUES ($1, $2, $3, now() + interval '30 days')`, [user.id, user.organizationId, hashRefreshToken(refreshToken)])
+    const metadata = sessionMetadata(_req)
+    await pool.query(`INSERT INTO refresh_sessions (user_id, organization_id, token_hash, expires_at, user_agent, ip_hash)
+      VALUES ($1, $2, $3, now() + interval '30 days', $4, $5)`, [user.id, user.organizationId, hashRefreshToken(refreshToken), metadata.userAgent, metadata.ipHash])
     setRefreshCookie(res, refreshToken, config)
     res.json({ accessToken: signAccessToken(user, config), user })
   })
@@ -353,16 +382,28 @@ export function createApp(config: Config, pool: Pool) {
     const token = refreshCookie(req, config)
     if (!token) return res.status(401).json({ error: 'refresh_required' })
     const session = await inTransaction(pool, async (client) => {
-      const result = await client.query<{ sessionId: string; id: string; email: string; role: Role; organizationId: string }>(
-        `SELECT s.id AS "sessionId", u.id, u.email, m.role, s.organization_id AS "organizationId" FROM refresh_sessions s
+      const result = await client.query<{ sessionId: string; familyId: string; revokedAt: string | null; expiresAt: string; id: string; email: string; role: Role; organizationId: string }>(
+        `SELECT s.id AS "sessionId", s.family_id AS "familyId", s.revoked_at AS "revokedAt", s.expires_at AS "expiresAt",
+                u.id, u.email, m.role, s.organization_id AS "organizationId" FROM refresh_sessions s
          JOIN users u ON u.id = s.user_id JOIN organization_members m ON m.user_id = u.id AND m.organization_id = s.organization_id
-         WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() FOR UPDATE`, [hashRefreshToken(token)])
+         WHERE s.token_hash = $1 FOR UPDATE`, [hashRefreshToken(token)])
       const current = result.rows[0]
       if (!current) return null
+      if (current.revokedAt) {
+        await client.query('UPDATE refresh_sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE family_id = $1', [current.familyId])
+        await client.query(
+          `INSERT INTO audit_logs (organization_id, actor_id, action, target, result)
+           VALUES ($1, $2, 'security.refresh_reuse', $3, 'denied')`,
+          [current.organizationId, current.id, current.familyId],
+        )
+        return null
+      }
+      if (Date.parse(current.expiresAt) <= Date.now()) return null
       const replacement = createRefreshToken()
       await client.query('UPDATE refresh_sessions SET revoked_at = now() WHERE id = $1', [current.sessionId])
-      await client.query(`INSERT INTO refresh_sessions (user_id, organization_id, token_hash, expires_at)
-        VALUES ($1, $2, $3, now() + interval '30 days')`, [current.id, current.organizationId, hashRefreshToken(replacement)])
+      const metadata = sessionMetadata(req)
+      await client.query(`INSERT INTO refresh_sessions (user_id, organization_id, token_hash, expires_at, family_id, user_agent, ip_hash)
+        VALUES ($1, $2, $3, now() + interval '30 days', $4, $5, $6)`, [current.id, current.organizationId, hashRefreshToken(replacement), current.familyId, metadata.userAgent, metadata.ipHash])
       return { user: { id: current.id, email: current.email, role: current.role, organizationId: current.organizationId }, replacement }
     })
     if (!session) return res.status(401).json({ error: 'invalid_refresh_session' })
@@ -381,18 +422,187 @@ export function createApp(config: Config, pool: Pool) {
     res.json({ user: req.user })
   })
 
+  app.get('/api/v1/security/sessions', requireAuth(config), async (req: AuthenticatedRequest, res) => {
+    const currentTokenHash = refreshCookie(req, config) ? hashRefreshToken(refreshCookie(req, config)!) : null
+    const sessions = await pool.query(
+      `SELECT id, created_at AS "createdAt", last_seen_at AS "lastSeenAt", expires_at AS "expiresAt",
+              user_agent AS "userAgent", (token_hash = $3) AS current
+       FROM refresh_sessions
+       WHERE user_id = $1 AND organization_id = $2 AND revoked_at IS NULL AND expires_at > now()
+       ORDER BY created_at DESC LIMIT 25`,
+      [req.user!.id, req.user!.organizationId, currentTokenHash],
+    )
+    res.json({ sessions: sessions.rows })
+  })
+
+  app.delete('/api/v1/security/sessions', requireAuth(config), async (req: AuthenticatedRequest, res) => {
+    const currentToken = refreshCookie(req, config)
+    if (!currentToken) return res.status(401).json({ error: 'refresh_required' })
+    const user = req.user!
+    const revoked = await pool.query(
+      `UPDATE refresh_sessions SET revoked_at = now()
+       WHERE user_id = $1 AND organization_id = $2 AND token_hash <> $3 AND revoked_at IS NULL
+       RETURNING id`,
+      [user.id, user.organizationId, hashRefreshToken(currentToken)],
+    )
+    await pool.query(
+      `INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
+       VALUES ($1, $2, 'security.sessions.revoke_others', $2, 'ok', $3::jsonb)`,
+      [user.organizationId, user.id, JSON.stringify({ revoked: revoked.rowCount })],
+    )
+    res.json({ revoked: revoked.rowCount })
+  })
+
+  app.post('/api/v1/security/password', requireAuth(config), rateLimit(pool, {
+    scope: 'security.password_change', limit: 5, windowSeconds: 60 * 60, key: (req: AuthenticatedRequest) => req.user!.id,
+  }), async (req: AuthenticatedRequest, res) => {
+    const input = passwordChangeSchema.parse(req.body)
+    const user = req.user!
+    const current = await pool.query<{ passwordHash: string }>('SELECT password_hash AS "passwordHash" FROM users WHERE id = $1', [user.id])
+    if (!await verifyPasswordOrDummy(input.currentPassword, current.rows[0]?.passwordHash)) {
+      return res.status(401).json({ error: 'invalid_current_password' })
+    }
+    const currentToken = refreshCookie(req, config)
+    await inTransaction(pool, async (client) => {
+      await client.query('UPDATE users SET password_hash = $2 WHERE id = $1', [user.id, await hashPassword(input.newPassword)])
+      await client.query(
+        `UPDATE refresh_sessions SET revoked_at = now()
+         WHERE user_id = $1 AND organization_id = $2 AND ($3::text IS NULL OR token_hash <> $3) AND revoked_at IS NULL`,
+        [user.id, user.organizationId, currentToken ? hashRefreshToken(currentToken) : null],
+      )
+      await client.query(
+        `INSERT INTO audit_logs (organization_id, actor_id, action, target, result)
+         VALUES ($1, $2, 'security.password.change', $2, 'ok')`,
+        [user.organizationId, user.id],
+      )
+    })
+    res.status(204).end()
+  })
+
+  app.get('/api/v1/billing', requireAuth(config), async (req: AuthenticatedRequest, res) => {
+    const result = await pool.query<{
+      name: string
+      plan: BillingPlan
+      subscriptionStatus: string
+      currentPeriodEnd: string | null
+      cancelAtPeriodEnd: boolean
+      hasCustomer: boolean
+      serversUsed: number
+      membersUsed: number
+    }>(
+      `SELECT o.name, o.plan, o.subscription_status AS "subscriptionStatus",
+              o.subscription_current_period_end AS "currentPeriodEnd",
+              o.subscription_cancel_at_period_end AS "cancelAtPeriodEnd",
+              (o.stripe_customer_id IS NOT NULL) AS "hasCustomer",
+              (SELECT count(*)::integer FROM agents a WHERE a.organization_id = o.id AND a.revoked_at IS NULL) AS "serversUsed",
+              (SELECT count(*)::integer FROM organization_members m WHERE m.organization_id = o.id) AS "membersUsed"
+       FROM organizations o WHERE o.id = $1`,
+      [req.user!.organizationId],
+    )
+    const organization = result.rows[0]
+    if (!organization) return res.status(404).json({ error: 'organization_not_found' })
+    res.json({
+      billing: {
+        ...organization,
+        configured: billingConfigured(config),
+        limits: PLAN_CATALOG[organization.plan],
+        canManage: req.user!.role === 'owner',
+      },
+      plans: PLAN_CATALOG,
+    })
+  })
+
+  app.post('/api/v1/billing/checkout', requireAuth(config), requireRole('owner'), rateLimit(pool, {
+    scope: 'billing.checkout', limit: 10, windowSeconds: 60 * 60, key: (req: AuthenticatedRequest) => req.user!.id,
+  }), async (req: AuthenticatedRequest, res) => {
+    const { plan } = checkoutSchema.parse(req.body)
+    const user = req.user!
+    const stripe = stripeClient(config)
+    const organization = await pool.query<{ name: string; customerId: string | null }>(
+      `SELECT name, stripe_customer_id AS "customerId" FROM organizations WHERE id = $1`,
+      [user.organizationId],
+    )
+    if (!organization.rowCount) return res.status(404).json({ error: 'organization_not_found' })
+    let customerId = organization.rows[0].customerId
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+        name: organization.rows[0].name,
+        metadata: { organizationId: user.organizationId },
+      }, { idempotencyKey: `nodedeck-customer-${user.organizationId}` })
+      customerId = customer.id
+      await pool.query(
+        `UPDATE organizations SET stripe_customer_id = $2, billing_updated_at = now()
+         WHERE id = $1 AND stripe_customer_id IS NULL`,
+        [user.organizationId, customerId],
+      )
+    }
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      customer: customerId,
+      client_reference_id: user.organizationId,
+      line_items: [{ price: priceIdForPlan(config, plan), quantity: 1 }],
+      allow_promotion_codes: true,
+      success_url: `${config.CORS_ORIGIN}/billing?checkout=success`,
+      cancel_url: `${config.CORS_ORIGIN}/billing?checkout=cancelled`,
+      metadata: { organizationId: user.organizationId, plan },
+      subscription_data: { metadata: { organizationId: user.organizationId, plan } },
+    })
+    if (!session.url) return res.status(503).json({ error: 'checkout_unavailable' })
+    await pool.query(
+      `INSERT INTO audit_logs (organization_id, actor_id, action, target, result, metadata)
+       VALUES ($1, $2, 'billing.checkout.create', $3, 'ok', $4::jsonb)`,
+      [user.organizationId, user.id, plan, JSON.stringify({ sessionId: session.id })],
+    )
+    res.json({ url: session.url })
+  })
+
+  app.post('/api/v1/billing/portal', requireAuth(config), requireRole('owner'), rateLimit(pool, {
+    scope: 'billing.portal', limit: 20, windowSeconds: 60 * 60, key: (req: AuthenticatedRequest) => req.user!.id,
+  }), async (req: AuthenticatedRequest, res) => {
+    const user = req.user!
+    const organization = await pool.query<{ customerId: string | null }>(
+      `SELECT stripe_customer_id AS "customerId" FROM organizations WHERE id = $1`,
+      [user.organizationId],
+    )
+    const customerId = organization.rows[0]?.customerId
+    if (!customerId) return res.status(409).json({ error: 'billing_customer_missing' })
+    const session = await stripeClient(config).billingPortal.sessions.create({
+      customer: customerId,
+      return_url: `${config.CORS_ORIGIN}/billing`,
+    })
+    res.json({ url: session.url })
+  })
+
   app.post('/api/v1/agent-enrollments', requireAuth(config), requireRole('owner', 'admin'), rateLimit(pool, {
     scope: 'ui.agent_enrollment', limit: 10, windowSeconds: 60 * 60, key: (req: AuthenticatedRequest) => req.user!.id,
   }), async (req: AuthenticatedRequest, res) => {
     const user = req.user!
     const { name } = enrollmentSchema.parse(req.body)
     const token = randomBytes(32).toString('base64url')
-    const result = await pool.query<{ id: string; expiresAt: string }>(
-      `INSERT INTO agent_enrollments (organization_id, token_hash, agent_name, created_by, expires_at)
-       VALUES ($1, $2, $3, $4, now() + interval '15 minutes')
-       RETURNING id, expires_at AS "expiresAt"`,
-      [user.organizationId, tokenHash(token), name, user.id],
-    )
+    const result = await inTransaction(pool, async (client) => {
+      const organization = await client.query<{ plan: BillingPlan }>(
+        'SELECT plan FROM organizations WHERE id = $1 FOR UPDATE',
+        [user.organizationId],
+      )
+      const plan = organization.rows[0]?.plan ?? 'free'
+      const usage = await client.query<{ count: number }>(
+        `SELECT (
+           (SELECT count(*) FROM agents WHERE organization_id = $1 AND revoked_at IS NULL)
+           + (SELECT count(*) FROM agent_enrollments WHERE organization_id = $1 AND used_at IS NULL AND expires_at > now())
+         )::integer AS count`,
+        [user.organizationId],
+      )
+      if (usage.rows[0].count >= PLAN_CATALOG[plan].servers) {
+        throw new BillingLimitError('servers', PLAN_CATALOG[plan].servers)
+      }
+      return client.query<{ id: string; expiresAt: string }>(
+        `INSERT INTO agent_enrollments (organization_id, token_hash, agent_name, created_by, expires_at)
+         VALUES ($1, $2, $3, $4, now() + interval '15 minutes')
+         RETURNING id, expires_at AS "expiresAt"`,
+        [user.organizationId, tokenHash(token), name, user.id],
+      )
+    })
     res.status(201).json({ enrollment: { id: result.rows[0].id, token, expiresAt: result.rows[0].expiresAt } })
   })
 

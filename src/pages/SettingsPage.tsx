@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BellRing, Bot, CheckCircle2, Plus, Send, Trash2, Webhook } from 'lucide-react'
+import { BellRing, Bot, CheckCircle2, KeyRound, Laptop, LogOut, Plus, Send, ShieldCheck, Trash2, Webhook } from 'lucide-react'
 import { Section } from '@/components/ui/Section'
 import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
@@ -9,8 +9,11 @@ import { useAuth } from '@/stores/auth'
 import { useToasts } from '@/stores/toasts'
 import {
   createNotificationChannel,
+  changePassword,
   deleteNotificationChannel,
+  fetchSecuritySessions,
   fetchNotificationChannels,
+  revokeOtherSecuritySessions,
   testNotificationChannel,
   type NotificationChannelInput,
 } from '@/services/operations'
@@ -57,6 +60,7 @@ export function SettingsPage() {
   }
 
   return <div className="space-y-6">
+    <SecurityPanel />
     <Section title="Notifications" subtitle="Get a message when a server or service needs attention">
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
         <Card className="overflow-hidden">
@@ -102,6 +106,70 @@ export function SettingsPage() {
       </div>
     </Section>
   </div>
+}
+
+function SecurityPanel() {
+  const accessToken = useAuth((state) => state.accessToken)
+  const queryClient = useQueryClient()
+  const pushToast = useToasts((state) => state.push)
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const sessions = useQuery({
+    queryKey: ['security-sessions'],
+    queryFn: () => fetchSecuritySessions(accessToken!),
+    enabled: Boolean(accessToken),
+  })
+  const revoke = useMutation({
+    mutationFn: () => revokeOtherSecuritySessions(accessToken!),
+    onSuccess: ({ revoked }) => {
+      void queryClient.invalidateQueries({ queryKey: ['security-sessions'] })
+      pushToast({ title: 'Other sessions closed', message: `${revoked} session${revoked === 1 ? '' : 's'} revoked.`, tone: 'success' })
+    },
+  })
+  const password = useMutation({
+    mutationFn: () => changePassword(accessToken!, currentPassword, newPassword),
+    onSuccess: () => {
+      setCurrentPassword(''); setNewPassword('')
+      void queryClient.invalidateQueries({ queryKey: ['security-sessions'] })
+      pushToast({ title: 'Password changed', message: 'Other devices were signed out.', tone: 'success' })
+    },
+  })
+
+  return <Section title="Account security" subtitle="Password and signed-in devices">
+    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
+      <Card className="overflow-hidden">
+        <div className="flex items-center justify-between gap-3 border-b border-border p-5">
+          <div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-accent/15 text-accent"><ShieldCheck className="h-5 w-5" /></span><div><h2 className="font-semibold text-fg">Signed-in devices</h2><p className="text-[12px] text-fg-muted">Rotating sessions detect reuse of a stolen cookie.</p></div></div>
+          <Button size="sm" variant="surface" onClick={() => revoke.mutate()} disabled={revoke.isPending || (sessions.data?.sessions.length ?? 0) <= 1}><LogOut className="h-3.5 w-3.5" />Sign out others</Button>
+        </div>
+        {sessions.isLoading && <p className="p-5 text-sm text-fg-muted">Loading sessions…</p>}
+        <div className="divide-y divide-border-soft">
+          {sessions.data?.sessions.slice(0, 5).map((session) => <div key={session.id} className="flex items-center gap-3 p-4">
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-surface-3 text-fg-muted"><Laptop className="h-4 w-4" /></span>
+            <div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="truncate text-sm font-medium text-fg">{deviceName(session.userAgent)}</span>{session.current && <Badge color="#6ee7b7">This device</Badge>}</div><p className="mt-0.5 text-[11px] text-fg-faint">Signed in {new Date(session.createdAt).toLocaleString()}</p></div>
+          </div>)}
+          {(sessions.data?.sessions.length ?? 0) > 5 && <p className="p-4 text-center text-[12px] text-fg-faint">+ {sessions.data!.sessions.length - 5} older sessions · use “Sign out others” to close them</p>}
+        </div>
+      </Card>
+
+      <Card className="p-5">
+        <div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-purple/15 text-purple"><KeyRound className="h-5 w-5" /></span><div><h2 className="font-semibold text-fg">Change password</h2><p className="text-[12px] text-fg-muted">At least 12 characters.</p></div></div>
+        <form className="mt-5 space-y-4" onSubmit={(event) => { event.preventDefault(); password.mutate() }}>
+          <Field label="Current password"><input required type="password" autoComplete="current-password" maxLength={128} value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="field" /></Field>
+          <Field label="New password"><input required type="password" autoComplete="new-password" minLength={12} maxLength={128} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="field" /></Field>
+          {password.isError && <p className="text-[12px] text-danger">{password.error.message}</p>}
+          <Button type="submit" variant="primary" className="w-full" disabled={password.isPending || newPassword.length < 12}><KeyRound className="h-4 w-4" />{password.isPending ? 'Changing…' : 'Change password'}</Button>
+        </form>
+      </Card>
+    </div>
+  </Section>
+}
+
+function deviceName(userAgent: string | null) {
+  if (!userAgent) return 'Unknown device'
+  const browser = userAgent.includes('Firefox/') ? 'Firefox' : userAgent.includes('Edg/') ? 'Edge' : userAgent.includes('Chrome/') ? 'Chrome' : userAgent.includes('Safari/') ? 'Safari' : 'Browser'
+  const os = userAgent.includes('Mac OS X') ? 'macOS' : userAgent.includes('Windows') ? 'Windows' : userAgent.includes('Android') ? 'Android' : userAgent.includes('iPhone') ? 'iPhone' : userAgent.includes('Linux') ? 'Linux' : 'device'
+  return `${browser} on ${os}`
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

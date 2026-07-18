@@ -24,6 +24,24 @@ For a TLS deployment, set `COOKIE_SECURE=true`, set `CORS_ORIGIN` to the public 
 and put TLS termination in front of the web container.
 Set `HOST_ALERT_THRESHOLD` (50–100, default `90`) to control when CPU, RAM, or disk usage opens a host alert.
 
+## Plans and Stripe billing
+
+NodeDeck enforces plan limits in the API: Free includes 2 servers, Pro 20, and Team 100.
+The dashboard remains fully usable on Free when Stripe is not configured. To enable upgrades,
+create recurring Pro and Team prices and set:
+
+```text
+STRIPE_SECRET_KEY=sk_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRO_PRICE_ID=price_...
+STRIPE_TEAM_PRICE_ID=price_...
+```
+
+Register `https://your-domain.example/api/v1/billing/webhook` for
+`checkout.session.completed`, `customer.subscription.created`,
+`customer.subscription.updated`, and `customer.subscription.deleted`. Webhook signatures are
+verified against the unmodified request body and event IDs are processed atomically once.
+
 ## Connect a server
 
 1. Sign in, open **Agents**, and click **Enroll agent**.

@@ -15,6 +15,10 @@ const schema = z.object({
   CRON_SECRET: z.preprocess((value) => value === '' ? undefined : value, z.string().min(32).optional()),
   BOOTSTRAP_EMAIL: z.string().email().optional(),
   BOOTSTRAP_PASSWORD: z.string().min(12).optional(),
+  STRIPE_SECRET_KEY: z.preprocess((value) => value === '' ? undefined : value, z.string().startsWith('sk_').optional()),
+  STRIPE_WEBHOOK_SECRET: z.preprocess((value) => value === '' ? undefined : value, z.string().startsWith('whsec_').optional()),
+  STRIPE_PRO_PRICE_ID: z.preprocess((value) => value === '' ? undefined : value, z.string().startsWith('price_').optional()),
+  STRIPE_TEAM_PRICE_ID: z.preprocess((value) => value === '' ? undefined : value, z.string().startsWith('price_').optional()),
 })
 
 export type Config = z.infer<typeof schema>

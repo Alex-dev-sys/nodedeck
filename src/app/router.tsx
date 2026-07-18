@@ -14,6 +14,7 @@ const managedService = lazy(async () => ({ default: (await import('@/pages/Servi
 const settings = lazy(async () => ({ default: (await import('@/pages/SettingsPage')).SettingsPage }))
 const agents = lazy(async () => ({ default: (await import('@/pages/AgentsPage')).AgentsPage }))
 const commands = lazy(async () => ({ default: (await import('@/pages/CommandsPage')).CommandsPage }))
+const billing = lazy(async () => ({ default: (await import('@/pages/BillingPage')).BillingPage }))
 
 function page(element: ReactNode) {
   return <Suspense fallback={<PageSkeleton />}>{element}</Suspense>
@@ -35,6 +36,7 @@ export const router = createBrowserRouter([
       { path: 'settings', element: page(createElement(settings)) },
       { path: 'agents', element: page(createElement(agents)) },
       { path: 'commands', element: page(createElement(commands)) },
+      { path: 'billing', element: page(createElement(billing)) },
       { path: '*', element: <Navigate to="/" replace /> },
     ],
   },

@@ -13,7 +13,7 @@ Include the affected route or agent version, impact, minimal reproduction steps,
 ## Trust model
 
 - The browser talks only to the NodeDeck control plane over HTTPS.
-- Access tokens are short lived and stay in browser memory. Refresh tokens are random, rotated, hashed in the database, and stored in an HttpOnly, SameSite cookie.
+- Access tokens are short lived and stay in browser memory. Refresh tokens are random, rotated, hashed in the database, and stored in an HttpOnly, SameSite cookie. Reuse of a rotated token revokes its entire session family and creates a denied audit event.
 - Every product query is scoped to the authenticated organization. Mutating routes also enforce an explicit role.
 - The Supabase Data API roles have no privileges on NodeDeck tables. The backend uses a trusted direct Postgres connection; RLS remains enabled as an additional deny-by-default boundary.
 - Agent enrollment tokens are one-time credentials that expire after 15 minutes. Long-lived agent tokens are random, stored only as hashes by the control plane, and can be revoked by deleting the agent.
@@ -35,6 +35,7 @@ NodeDeck redacts common password, bearer-token, API-key, and database-URL patter
 - Keep the pinned agent release current and review changes before updating the pin.
 - Review Supabase security advisors, Vercel runtime errors, dependency audit results, and failed authentication traffic before every release.
 - Rotate any credential immediately if it appears in a terminal recording, issue, chat, log, or build artifact.
+- Keep Stripe secrets server-side, verify every webhook signature against the raw request body, and never grant browser roles access to billing event tables.
 
 ## Defense in depth
 

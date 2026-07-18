@@ -66,7 +66,11 @@ export function AgentsPage() {
       const response = await fetch('/api/v1/agent-enrollments', {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
       })
-      if (!response.ok) throw new Error('Could not create an enrollment token.')
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: string; message?: string } | null
+        if (body?.error === 'plan_limit_reached') throw new Error(`${body.message ?? 'Server limit reached.'} Upgrade in Plan & billing.`)
+        throw new Error(body?.message ?? 'Could not create an enrollment token.')
+      }
       return response.json() as Promise<{ enrollment: Enrollment }>
     },
     onSuccess: (data) => { setEnrollment(data.enrollment); setCopied(false) },

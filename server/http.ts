@@ -58,6 +58,13 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
     res.status(status).json({ error: code, requestId: (req as AuthenticatedRequest).requestId })
     return
   }
+  const publicCode = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+    && /^[a-z0-9_]{1,64}$/.test(error.code) ? error.code : undefined
+  if (status && [402, 403, 404, 409, 429, 503].includes(status) && publicCode) {
+    const message = error instanceof Error ? error.message : undefined
+    res.status(status).json({ error: publicCode, ...(message ? { message } : {}), requestId: (req as AuthenticatedRequest).requestId })
+    return
+  }
   const unsafeCode = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
   const code = typeof unsafeCode === 'string' && /^[A-Z0-9_]{1,64}$/.test(unsafeCode) ? unsafeCode : undefined
   console.error(JSON.stringify({
