@@ -6,12 +6,64 @@ set -eu
 CONTROL_URL=${SERVER_OS_CONTROL_URL:-http://127.0.0.1:8081}
 INTERVAL_SECONDS=${SERVER_OS_HEARTBEAT_INTERVAL:-20}
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HTTP_HELPER=${SERVER_OS_AGENT_HTTP_HELPER:-"$ROOT_DIR/agent-http.sh"}
+PROC_STAT_PATH=${SERVER_OS_PROC_STAT_PATH:-/proc/stat}
+CPU_SAMPLE_SECONDS=${SERVER_OS_CPU_SAMPLE_SECONDS:-1}
+HEARTBEAT_ONCE=${SERVER_OS_HEARTBEAT_ONCE:-false}
+PREVIOUS_CPU_TOTAL=
+PREVIOUS_CPU_IDLE=
 
 case "$INTERVAL_SECONDS" in
   *[!0-9]*|'') echo "SERVER_OS_HEARTBEAT_INTERVAL must be a positive number" >&2; exit 1 ;;
 esac
 
 echo "Server-OS agent heartbeat started: ${CONTROL_URL} every ${INTERVAL_SECONDS}s"
+
+read_linux_cpu_sample() {
+  awk '/^cpu / {
+    total = 0
+    last = NF < 9 ? NF : 9
+    for (field = 2; field <= last; field++) total += $field
+    idle = $5 + $6
+    printf "%.0f %.0f\n", total, idle
+    exit
+  }' "$PROC_STAT_PATH"
+}
+
+host_cpu_percent() {
+  if [ -r "$PROC_STAT_PATH" ]; then
+    set -- $(read_linux_cpu_sample)
+    current_total=${1:-0}
+    current_idle=${2:-0}
+    if [ -z "$PREVIOUS_CPU_TOTAL" ]; then
+      PREVIOUS_CPU_TOTAL=$current_total
+      PREVIOUS_CPU_IDLE=$current_idle
+      sleep "$CPU_SAMPLE_SECONDS"
+      set -- $(read_linux_cpu_sample)
+      current_total=${1:-0}
+      current_idle=${2:-0}
+    fi
+    total_delta=$((current_total - PREVIOUS_CPU_TOTAL))
+    idle_delta=$((current_idle - PREVIOUS_CPU_IDLE))
+    PREVIOUS_CPU_TOTAL=$current_total
+    PREVIOUS_CPU_IDLE=$current_idle
+    CPU=$(awk -v total="$total_delta" -v idle="$idle_delta" 'BEGIN {
+      if (total <= 0) { print 0; exit }
+      value = (total - idle) * 100 / total
+      if (value < 0) value = 0
+      if (value > 100) value = 100
+      printf "%.0f", value
+    }')
+    return
+  fi
+  if command -v top >/dev/null 2>&1 && [ "$(uname -s)" = Darwin ]; then
+    CPU=$(top -l 1 2>/dev/null | awk -F'[,:%]' '/CPU usage/ { printf "%.0f", $2 + $4; exit }' || echo 0)
+    return
+  fi
+  cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+  case "$cores" in *[!0-9]*|' '|''|0) cores=1 ;; esac
+  CPU=$(ps -A -o %cpu= 2>/dev/null | awk -v cores="$cores" '{sum += $1} END { value = sum / cores; if (value > 100) value = 100; printf "%.0f", value }' || echo 0)
+}
 
 host_ram_percent() {
   if [ -r /proc/meminfo ]; then
@@ -39,11 +91,7 @@ host_uptime_seconds() {
 }
 
 while :; do
-  if command -v top >/dev/null 2>&1 && [ "$(uname -s)" = Darwin ]; then
-    CPU=$(top -l 1 2>/dev/null | awk -F'[,:%]' '/CPU usage/ { printf "%.0f", $2 + $4; exit }' || echo 0)
-  else
-    CPU=$(ps -A -o %cpu= 2>/dev/null | awk '{sum += $1} END { printf "%.0f", sum }' || echo 0)
-  fi
+  host_cpu_percent
   RAM=$(host_ram_percent)
   DISK=$(df -P / 2>/dev/null | awk 'NR == 2 { gsub(/%/, "", $5); print $5 }' || echo 0)
   UPTIME=$(host_uptime_seconds)
@@ -53,12 +101,13 @@ while :; do
   [ -n "$UPTIME" ] || UPTIME=0
   [ "$CPU" -le 100 ] 2>/dev/null || CPU=100
   [ "$RAM" -le 100 ] 2>/dev/null || RAM=100
-  if ! "$ROOT_DIR/agent-http.sh" --fail --silent --show-error \
+  if ! "$HTTP_HELPER" --fail --silent --show-error \
     --request POST "${CONTROL_URL}/agent/v1/heartbeat" \
     --header 'Content-Type: application/json' \
     --data "{\"host\":{\"cpu\":${CPU},\"ram\":${RAM},\"disk\":${DISK},\"uptimeSec\":${UPTIME}}}"
   then
     echo "Server-OS heartbeat failed; retrying on the next interval" >&2
   fi
+  [ "$HEARTBEAT_ONCE" = true ] && break
   sleep "$INTERVAL_SECONDS"
 done
