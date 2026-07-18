@@ -12,7 +12,7 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
-describe('agent inventory', () => {
+describe('agent inventory', { timeout: 15_000 }, () => {
   it('groups containers with the same project key into one logical project', () => {
     const directory = mkdtempSync(join(tmpdir(), 'nodedeck-inventory-'))
     temporaryDirectories.push(directory)

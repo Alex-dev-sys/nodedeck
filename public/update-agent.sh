@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-AGENT_RELEASE_REF=de37301b0ba5a18c1fc23ddbff30141bffdf2e49
+AGENT_RELEASE_REF=cb452c2de95e3ce734f8f9a87b308bcc6917254f
 ARCHIVE_URL="https://github.com/Alex-dev-sys/nodedeck/archive/${AGENT_RELEASE_REF}.tar.gz"
 
 command -v curl >/dev/null 2>&1 || { echo "curl is required." >&2; exit 1; }

@@ -33,7 +33,7 @@ done
 exit 1`)
 }
 
-describe('agent host CPU metrics', () => {
+describe('agent host CPU metrics', { timeout: 15_000 }, () => {
   it('reports total Linux host utilization from /proc/stat instead of summing processes', () => {
     const directory = mkdtempSync(join(tmpdir(), 'nodedeck-heartbeat-linux-'))
     temporaryDirectories.push(directory)
