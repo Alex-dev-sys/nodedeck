@@ -13,7 +13,7 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
 umask 077
 mkdir -p "$STATE_DIR" "$BIN_DIR"
-for script in agent-daemon.sh agent-run.sh agent-http.sh agent-capabilities.sh agent-heartbeat.sh agent-inventory.sh agent-logs.sh agent-commands.sh agent-command-exec.sh; do
+for script in agent-daemon.sh agent-run.sh agent-http.sh agent-capabilities.sh agent-update-check.sh agent-heartbeat.sh agent-inventory.sh agent-logs.sh agent-commands.sh agent-command-exec.sh; do
   cp "$ROOT_DIR/$script" "$BIN_DIR/$script"
   chmod 700 "$BIN_DIR/$script"
 done

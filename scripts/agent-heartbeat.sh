@@ -7,7 +7,7 @@ CONTROL_URL=${SERVER_OS_CONTROL_URL:-http://127.0.0.1:8081}
 INTERVAL_SECONDS=${SERVER_OS_HEARTBEAT_INTERVAL:-20}
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 HTTP_HELPER=${SERVER_OS_AGENT_HTTP_HELPER:-"$ROOT_DIR/agent-http.sh"}
-AGENT_VERSION=2026.07.18.1
+AGENT_VERSION=2026.07.18.2
 . "$ROOT_DIR/agent-capabilities.sh"
 PROC_STAT_PATH=${SERVER_OS_PROC_STAT_PATH:-/proc/stat}
 CPU_SAMPLE_SECONDS=${SERVER_OS_CPU_SAMPLE_SECONDS:-1}
@@ -115,6 +115,7 @@ while :; do
     --data "$payload")
   then
     save_agent_capabilities "$response"
+    "$ROOT_DIR/agent-update-check.sh" "$AGENT_VERSION" "$response" || true
   else
     echo "Server-OS heartbeat failed; retrying on the next interval" >&2
   fi

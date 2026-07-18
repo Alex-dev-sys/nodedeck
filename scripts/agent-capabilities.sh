@@ -8,6 +8,7 @@ load_agent_capabilities() {
   SERVER_OS_TRACK_NATIVE=true
   SERVER_OS_COLLECT_LOGS=true
   SERVER_OS_REMOTE_CONTROL=true
+  SERVER_OS_AUTOMATIC_UPDATES=true
   if [ -r "$AGENT_CAPABILITIES_FILE" ]; then
     # This file is generated locally from the authenticated control-plane response.
     . "$AGENT_CAPABILITIES_FILE"
@@ -28,13 +29,15 @@ save_agent_capabilities() {
       (.trackDocker | type) == "boolean" and
       (.trackNative | type) == "boolean" and
       (.collectLogs | type) == "boolean" and
-      (.remoteControl | type) == "boolean"
+      (.remoteControl | type) == "boolean" and
+      (.automaticUpdates | type) == "boolean"
     ) |
     "SERVER_OS_TRACK_HOST_METRICS=\(.trackHostMetrics)\n" +
     "SERVER_OS_TRACK_DOCKER=\(.trackDocker)\n" +
     "SERVER_OS_TRACK_NATIVE=\(.trackNative)\n" +
     "SERVER_OS_COLLECT_LOGS=\(.collectLogs)\n" +
-    "SERVER_OS_REMOTE_CONTROL=\(.remoteControl)"
+    "SERVER_OS_REMOTE_CONTROL=\(.remoteControl)\n" +
+    "SERVER_OS_AUTOMATIC_UPDATES=\(.automaticUpdates)"
   ') || return 0
   directory=$(dirname "$AGENT_CAPABILITIES_FILE")
   umask 077

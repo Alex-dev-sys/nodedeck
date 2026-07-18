@@ -25,7 +25,7 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = --data ]; then
     shift
     printf '%s\\n' "$1" > "$SERVER_OS_TEST_PAYLOAD_FILE"
-    printf '%s\\n' '{"capabilities":{"trackHostMetrics":true,"trackDocker":true,"trackNative":true,"collectLogs":true,"remoteControl":true}}'
+    printf '%s\\n' '{"capabilities":{"trackHostMetrics":true,"trackDocker":true,"trackNative":true,"collectLogs":true,"remoteControl":true,"automaticUpdates":true}}'
     exit 0
   fi
   shift
@@ -61,7 +61,7 @@ describe('agent host CPU metrics', { timeout: 15_000 }, () => {
     expect(result.status, result.stderr).toBe(0)
     const payload = JSON.parse(readFileSync(payloadFile, 'utf8')) as { host: { cpu: number }; agentVersion: string }
     expect(payload.host.cpu).toBe(20)
-    expect(payload.agentVersion).toBe('2026.07.18.1')
+    expect(payload.agentVersion).toBe('2026.07.18.2')
   })
 
   it('normalizes the process fallback by the number of CPU cores', () => {
@@ -113,6 +113,6 @@ describe('agent host CPU metrics', { timeout: 15_000 }, () => {
     })
 
     expect(result.status, result.stderr).toBe(0)
-    expect(JSON.parse(readFileSync(payloadFile, 'utf8'))).toEqual({ agentVersion: '2026.07.18.1' })
+    expect(JSON.parse(readFileSync(payloadFile, 'utf8'))).toEqual({ agentVersion: '2026.07.18.2' })
   })
 })

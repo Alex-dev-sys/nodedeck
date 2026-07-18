@@ -20,10 +20,11 @@ interface Agent {
   trackNative: boolean
   collectLogs: boolean
   remoteControl: boolean
+  automaticUpdates: boolean
   settingsUpdatedAt: string
 }
 
-type AgentCapabilities = Pick<Agent, 'trackHostMetrics' | 'trackDocker' | 'trackNative' | 'collectLogs' | 'remoteControl'>
+type AgentCapabilities = Pick<Agent, 'trackHostMetrics' | 'trackDocker' | 'trackNative' | 'collectLogs' | 'remoteControl' | 'automaticUpdates'>
 
 interface Enrollment {
   id: string
@@ -103,7 +104,7 @@ export function AgentsPage() {
     <div className="mt-6 grid gap-4 md:grid-cols-2">
       {agents.map((agent) => {
         const online = agent.lastSeenAt && now - Date.parse(agent.lastSeenAt) < 60_000
-        const enabledCapabilities = [agent.trackHostMetrics, agent.trackDocker, agent.trackNative, agent.collectLogs, agent.remoteControl].filter(Boolean).length
+        const enabledCapabilities = [agent.trackHostMetrics, agent.trackDocker, agent.trackNative, agent.collectLogs, agent.remoteControl, agent.automaticUpdates].filter(Boolean).length
         const updateAvailable = agent.agentVersion !== latestAgentVersion
         return <article
           key={agent.id}
@@ -116,7 +117,7 @@ export function AgentsPage() {
           <div className="flex items-center gap-3">
             <span className="grid h-10 w-10 place-items-center rounded-xl bg-accent/15 text-accent"><Server className="h-5 w-5" /></span>
             <div className="min-w-0 flex-1"><h2 className="truncate font-semibold text-fg">{agent.name}</h2><p className="truncate text-sm text-fg-muted">{agent.hostname}</p></div>
-            <span className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-1 text-[11px] text-fg-muted"><Settings2 className="h-3 w-3" />{enabledCapabilities}/5</span>
+            <span className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-1 text-[11px] text-fg-muted"><Settings2 className="h-3 w-3" />{enabledCapabilities}/6</span>
             {canRevoke && <button
               disabled={revoke.isPending}
               onClick={(event) => { event.stopPropagation(); revoke.reset(); setAgentToRevoke(agent) }}
@@ -145,12 +146,13 @@ export function AgentsPage() {
   </div>
 }
 
-const capabilityOptions: Array<{ key: keyof AgentCapabilities; title: string; description: string; group: 'Monitoring' | 'Control' }> = [
+const capabilityOptions: Array<{ key: keyof AgentCapabilities; title: string; description: string; group: 'Monitoring' | 'Control' | 'Maintenance' }> = [
   { key: 'trackHostMetrics', title: 'Server metrics', description: 'CPU, RAM, disk and uptime.', group: 'Monitoring' },
   { key: 'trackDocker', title: 'Docker projects', description: 'Containers and Docker Compose projects.', group: 'Monitoring' },
   { key: 'trackNative', title: 'Native applications', description: 'systemd, PM2 and macOS LaunchAgents.', group: 'Monitoring' },
   { key: 'collectLogs', title: 'Container logs', description: 'Recent redacted Docker logs for diagnostics.', group: 'Monitoring' },
   { key: 'remoteControl', title: 'Remote control', description: 'Allow start, stop, restart and auto-recovery.', group: 'Control' },
+  { key: 'automaticUpdates', title: 'Automatic updates', description: 'Install verified agent releases without another command.', group: 'Maintenance' },
 ]
 
 function AgentSettingsDialog({ agent, latestVersion, canEdit, pending, error, save, close }: { agent: Agent; latestVersion: string; canEdit: boolean; pending: boolean; error?: string; save: (settings: AgentCapabilities) => void; close: () => void }) {
@@ -160,10 +162,12 @@ function AgentSettingsDialog({ agent, latestVersion, canEdit, pending, error, sa
     trackNative: agent.trackNative,
     collectLogs: agent.collectLogs,
     remoteControl: agent.remoteControl,
+    automaticUpdates: agent.automaticUpdates,
   })
   const [copiedUpdate, setCopiedUpdate] = useState(false)
   const updateCommand = "curl --proto '=https' --tlsv1.2 -fsSL 'https://nodedeck-zeta.vercel.app/update-agent.sh' | sh"
   const updateAvailable = agent.agentVersion !== latestVersion
+  const supportsAutomaticUpdates = Boolean(agent.agentVersion && agent.agentVersion >= '2026.07.18.2')
 
   const toggle = (key: keyof AgentCapabilities) => {
     if (!canEdit) return
@@ -177,8 +181,8 @@ function AgentSettingsDialog({ agent, latestVersion, canEdit, pending, error, sa
 
   return <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/60 p-4"><div role="dialog" aria-modal="true" aria-labelledby="agent-settings-title" className="my-4 w-full max-w-xl rounded-2xl border border-border bg-surface p-5 shadow-2xl">
     <div className="flex items-start justify-between gap-3"><div><h2 id="agent-settings-title" className="text-lg font-semibold text-fg">{agent.name} capabilities</h2><p className="mt-1 text-sm text-fg-muted">Choose what this agent may observe and control.</p></div><button type="button" onClick={close} disabled={pending} aria-label="Close" className="text-fg-faint hover:text-fg disabled:opacity-50"><X className="h-5 w-5" /></button></div>
-    {(['Monitoring', 'Control'] as const).map((group) => <section key={group} className="mt-5"><h3 className="text-xs font-semibold uppercase tracking-wider text-fg-faint">{group}</h3><div className="mt-2 divide-y divide-border rounded-xl border border-border bg-surface-2">{capabilityOptions.filter((option) => option.group === group).map((option) => <div key={option.key} className="flex items-center gap-4 p-3.5"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-fg">{option.title}</p><p className="mt-0.5 text-xs text-fg-muted">{option.description}</p></div><button type="button" role="switch" aria-checked={settings[option.key]} disabled={!canEdit || pending} onClick={() => toggle(option.key)} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settings[option.key] ? 'bg-accent' : 'bg-border'} disabled:opacity-50`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settings[option.key] ? 'left-[22px]' : 'left-0.5'}`} /></button></div>)}</div></section>)}
-    <div className="mt-5 rounded-xl border border-border bg-surface-2 p-3.5"><div className="flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-accent" /><p className="text-sm font-medium text-fg">Agent version</p></div><p className="mt-1 text-xs text-fg-muted">Installed: {agent.agentVersion ?? 'unknown'} · Latest: {latestVersion}</p>{updateAvailable && <><pre className="mt-3 overflow-x-auto whitespace-pre rounded-lg border border-border bg-[#0b0c10] p-2.5 text-[11px] text-fg-muted"><code>{updateCommand}</code></pre><button type="button" onClick={async () => { await navigator.clipboard.writeText(updateCommand); setCopiedUpdate(true) }} className="mt-2 inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-2.5 text-xs text-fg">{copiedUpdate ? <Check className="h-3.5 w-3.5 text-accent" /> : <Copy className="h-3.5 w-3.5" />}{copiedUpdate ? 'Copied' : 'Copy update command'}</button></>}</div>
+    {(['Monitoring', 'Control', 'Maintenance'] as const).map((group) => <section key={group} className="mt-5"><h3 className="text-xs font-semibold uppercase tracking-wider text-fg-faint">{group}</h3><div className="mt-2 divide-y divide-border rounded-xl border border-border bg-surface-2">{capabilityOptions.filter((option) => option.group === group).map((option) => <div key={option.key} className="flex items-center gap-4 p-3.5"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-fg">{option.title}</p><p className="mt-0.5 text-xs text-fg-muted">{option.description}</p></div><button type="button" role="switch" aria-checked={settings[option.key]} disabled={!canEdit || pending} onClick={() => toggle(option.key)} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settings[option.key] ? 'bg-accent' : 'bg-border'} disabled:opacity-50`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settings[option.key] ? 'left-[22px]' : 'left-0.5'}`} /></button></div>)}</div></section>)}
+    <div className="mt-5 rounded-xl border border-border bg-surface-2 p-3.5"><div className="flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-accent" /><p className="text-sm font-medium text-fg">Agent version</p></div><p className="mt-1 text-xs text-fg-muted">Installed: {agent.agentVersion ?? 'unknown'} · Latest: {latestVersion}</p>{updateAvailable && <p className="mt-2 text-xs text-warning">{supportsAutomaticUpdates && settings.automaticUpdates ? 'Verified automatic update is pending.' : 'One manual update is required to enable automatic updates.'}</p>}{updateAvailable && <><pre className="mt-3 overflow-x-auto whitespace-pre rounded-lg border border-border bg-[#0b0c10] p-2.5 text-[11px] text-fg-muted"><code>{updateCommand}</code></pre><button type="button" onClick={async () => { await navigator.clipboard.writeText(updateCommand); setCopiedUpdate(true) }} className="mt-2 inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-2.5 text-xs text-fg">{copiedUpdate ? <Check className="h-3.5 w-3.5 text-accent" /> : <Copy className="h-3.5 w-3.5" />}{copiedUpdate ? 'Copied' : 'Copy update command'}</button></>}</div>
     {error && <p className="mt-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</p>}
     <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={close} disabled={pending} className="h-9 rounded-lg border border-border bg-surface-2 px-3 text-sm text-fg disabled:opacity-50">{canEdit ? 'Cancel' : 'Close'}</button>{canEdit && <button type="button" onClick={() => save(settings)} disabled={pending} className="h-9 rounded-lg bg-accent px-4 text-sm font-semibold text-[#04150e] disabled:opacity-50">{pending ? 'Saving…' : 'Save capabilities'}</button>}</div>
   </div></div>

@@ -32,6 +32,7 @@ const agentCapabilitiesSchema = z.object({
   trackNative: z.boolean(),
   collectLogs: z.boolean(),
   remoteControl: z.boolean(),
+  automaticUpdates: z.boolean(),
 }).strict()
 const heartbeatSchema = z.object({
   agentVersion: z.string().trim().min(1).max(64).optional(),
@@ -87,6 +88,8 @@ const notificationChannelSchema = z.discriminatedUnion('kind', [
 const uuidSchema = z.string().uuid()
 const serviceIdSchema = z.string().min(1).max(128)
 const AGENT_RELEASE_VERSION = '2026.07.18.1'
+const AGENT_RELEASE_REF = 'cb452c2de95e3ce734f8f9a87b308bcc6917254f'
+const AGENT_RELEASE_ARCHIVE_SHA256 = '6a3af97cd8cdd6c97b9438327b888aaa54bece31b1c28e14d975eabf9e05402c'
 
 function tokenHash(token: string) {
   return createHash('sha256').update(token).digest('hex')
@@ -399,7 +402,8 @@ export function createApp(config: Config, pool: Pool) {
               host_cpu AS "hostCpu", host_ram AS "hostRam", host_disk AS "hostDisk", host_uptime_sec AS "hostUptimeSec",
               agent_version AS "agentVersion", track_host_metrics AS "trackHostMetrics",
               track_docker AS "trackDocker", track_native AS "trackNative", collect_logs AS "collectLogs",
-              remote_control AS "remoteControl", settings_updated_at AS "settingsUpdatedAt"
+              remote_control AS "remoteControl", automatic_updates AS "automaticUpdates",
+              settings_updated_at AS "settingsUpdatedAt"
        FROM agents WHERE organization_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC`,
       [req.user!.organizationId],
     )
@@ -414,7 +418,7 @@ export function createApp(config: Config, pool: Pool) {
       const result = await client.query(
         `UPDATE agents SET
            track_host_metrics = $3, track_docker = $4, track_native = $5, collect_logs = $6,
-           remote_control = $7, settings_updated_at = now(),
+           remote_control = $7, automatic_updates = $8, settings_updated_at = now(),
            host_cpu = CASE WHEN $3 THEN host_cpu ELSE NULL END,
            host_ram = CASE WHEN $3 THEN host_ram ELSE NULL END,
            host_disk = CASE WHEN $3 THEN host_disk ELSE NULL END,
@@ -422,8 +426,8 @@ export function createApp(config: Config, pool: Pool) {
          WHERE id = $1 AND organization_id = $2 AND revoked_at IS NULL
          RETURNING track_host_metrics AS "trackHostMetrics", track_docker AS "trackDocker",
            track_native AS "trackNative", collect_logs AS "collectLogs", remote_control AS "remoteControl",
-           settings_updated_at AS "settingsUpdatedAt"`,
-        [agentId, user.organizationId, input.trackHostMetrics, input.trackDocker, input.trackNative, input.collectLogs, input.remoteControl],
+           automatic_updates AS "automaticUpdates", settings_updated_at AS "settingsUpdatedAt"`,
+        [agentId, user.organizationId, input.trackHostMetrics, input.trackDocker, input.trackNative, input.collectLogs, input.remoteControl, input.automaticUpdates],
       )
       if (!result.rowCount) return null
       if (!input.trackHostMetrics) {
@@ -588,6 +592,7 @@ export function createApp(config: Config, pool: Pool) {
       trackNative: boolean
       collectLogs: boolean
       remoteControl: boolean
+      automaticUpdates: boolean
     }>(
       `UPDATE agents
        SET last_seen_at = now(), agent_version = COALESCE($5, agent_version),
@@ -598,7 +603,7 @@ export function createApp(config: Config, pool: Pool) {
        WHERE token_hash = $6 AND revoked_at IS NULL
        RETURNING id, organization_id AS "organizationId", track_host_metrics AS "trackHostMetrics",
          track_docker AS "trackDocker", track_native AS "trackNative", collect_logs AS "collectLogs",
-         remote_control AS "remoteControl"`,
+         remote_control AS "remoteControl", automatic_updates AS "automaticUpdates"`,
       [host?.cpu ?? null, host?.ram ?? null, host?.disk ?? null, host?.uptimeSec ?? null, agentVersion ?? null, tokenHash(agentToken)],
     )
     if (!result.rowCount) return res.status(401).json({ error: 'invalid_agent_token' })
@@ -634,8 +639,14 @@ export function createApp(config: Config, pool: Pool) {
         trackNative: current.trackNative,
         collectLogs: current.collectLogs,
         remoteControl: current.remoteControl,
+        automaticUpdates: current.automaticUpdates,
       },
-      latestAgentVersion: AGENT_RELEASE_VERSION,
+      agentRelease: {
+        version: AGENT_RELEASE_VERSION,
+        ref: AGENT_RELEASE_REF,
+        archiveUrl: `https://github.com/Alex-dev-sys/nodedeck/archive/${AGENT_RELEASE_REF}.tar.gz`,
+        sha256: AGENT_RELEASE_ARCHIVE_SHA256,
+      },
     })
   })
 
